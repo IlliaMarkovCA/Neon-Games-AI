@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pulse Gate Runner</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: #05051a;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  font-family: 'Courier New', monospace;
+  color: #00e5ff;
+  user-select: none;
+  overflow: hidden;
+}
+#hud {
+  display: flex;
+  gap: 44px;
+  padding: 14px 0 8px;
+  font-size: 13px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+}
+.val { color: #ff00cc; }
+canvas {
+  display: block;
+  border: 1px solid rgba(0,229,255,0.45);
+  box-shadow: 0 0 32px rgba(0,229,255,0.18), 0 0 2px rgba(0,229,255,0.9);
+}
+#ctrl {
+  padding: 9px 0 0;
+  font-size: 11px;
+  color: rgba(0,229,255,0.38);
+  letter-spacing: 2px;
+}
+#ctrl b { color: rgba(0,229,255,0.72); font-weight:normal; }
+#overlay {
+  position: fixed; inset:0;
+  background: rgba(5,5,26,0.94);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+#overlay h1 {
+  font-size: 28px;
+  letter-spacing: 8px;
+  color: #00e5ff;
+  text-shadow: 0 0 22px #00e5ff, 0 0 55px rgba(0,229,255,0.28);
+  margin-bottom: 16px;
+}
+.sub { font-size:11px; letter-spacing:3px; color:rgba(0,229,255,0.48); margin:4px 0; }
+.btn {
+  margin-top: 28px;
+  padding: 12px 50px;
+  border: 1px solid #00e5ff;
+  background: transparent;
+  color: #00e5ff;
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  letter-spacing: 5px;
+  cursor: pointer;
+  text-transform: uppercase;
+  box-shadow: 0 0 14px rgba(0,229,255,0.18);
+  transition: all 0.2s;
+}
+.btn:hover { background:rgba(0,229,255,0.09); box-shadow:0 0 28px rgba(0,229,255,0.38); }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <span>SCORE <span class="val" id="hSc">0</span></span>
+  <span>COMBO <span class="val" id="hCo">×1</span></span>
+  <span>SPEED <span class="val" id="hSp">1</span></span>
+  <span>DASH <span class="val" id="hDa">READY</span></span>
+</div>
+
+<canvas id="cv" width="900" height="500"></canvas>
+
+<div id="ctrl">
+  Controls: <b>W / ↑</b> up &nbsp;·&nbsp; <b>S / ↓</b> down &nbsp;·&nbsp; <b>SPACE</b> dash (2 s cooldown)
+</div>
+
+<div id="overlay">
+  <h1>PULSE GATE RUNNER</h1>
+  <div class="sub">FLY THROUGH PULSING NEON GATES · SURVIVE AS LONG AS POSSIBLE</div>
+  <div class="sub" style="color:rgba(255,0,204,0.48)">TOUCHING A GATE WALL OR OBSTACLE = GAME OVER</div>
+  <button class="btn" onclick="startGame()">ENGAGE</button>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────
+//  CANVAS + KEYS
+// ─────────────────────────────────────────────────────────────
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const W   = cv.width, H = cv.height;
+const OV  = document.getElementById('overlay');
+
+const keys = {};
+document.addEventListener('keydown', e=>{ keys[e.key]=true;  if(e.key===' ')e.preventDefault(); });
+document.addEventListener('keyup',   e=>{ keys[e.key]=false; });
+
+// ─────────────────────────────────────────────────────────────
+//  PLAYER
+// ─────────────────────────────────────────────────────────────
+class Player {
+  constructor() {
+    this.x=155; this.y=H/2; this.size=19;
+    this.moveSpd=315;
+    this.dashing=false; this.dashT=0;
+    this.dashDur=0.22;
+    this.dashCD=0; this.dashCDMax=2.0;
+    this.trail=[]; this.dead=false; this.deathT=0;
+  }
+  update(dt) {
+    if(this.dead){this.deathT+=dt;return;}
+    let vy=0;
+    if(keys['ArrowUp']  ||keys['w']||keys['W']) vy=-1;
+    if(keys['ArrowDown']||keys['s']||keys['S']) vy= 1;
+    if(this.dashCD>0) this.dashCD-=dt;
+    if((keys[' ']||keys['Space'])&&this.dashCD<=0&&!this.dashing) {
+      this.dashing=true; this.dashT=this.dashDur; this.dashCD=this.dashCDMax;
+    }
+    let spd=this.moveSpd;
+    if(this.dashing){
+      this.dashT-=dt; spd=740;
+      if(this.dashT<=0) this.dashing=false;
+    }
+    this.y+=vy*spd*dt;
+    this.y=Math.max(this.size+2, Math.min(H-this.size-2, this.y));
+    this.trail.push({x:this.x, y:this.y});
+    if(this.trail.length>26) this.trail.shift();
+  }
+  draw() {
+    const s=this.size;
+    if(this.dead) {
+      // death shockwaves
+      for(let i=0;i<4;i++){
+        const r=(this.deathT*190)*(i+1)*0.38;
+        const a=Math.max(0,1-this.deathT*2.8-i*0.18);
+        ctx.strokeStyle=`rgba(0,229,255,${a})`;
+        ctx.lineWidth=2;
+        ctx.beginPath(); ctx.arc(this.x,this.y,r,0,Math.PI*2); ctx.stroke();
+      }
+      return;
+    }
+    const col=this.dashing?'#ffffff':'#00e5ff';
+    // trail
+    for(let i=0;i<this.trail.length;i++){
+      const tp=this.trail[i];
+      const a=(i/this.trail.length)*(this.dashing?0.55:0.28);
+      const ts=s*0.52*(i/this.trail.length);
+      ctx.globalAlpha=a; ctx.fillStyle=col;
+      drawTri(tp.x, tp.y, ts);
+    }
+    ctx.globalAlpha=1;
+    // glow + body
+    ctx.shadowBlur=this.dashing?48:24; ctx.shadowColor=col;
+    ctx.fillStyle=col; drawTri(this.x,this.y,s);
+    // inner highlight
+    ctx.shadowBlur=0;
+    ctx.fillStyle=this.dashing?'#ccffff':'#88ffee';
+    drawTri(this.x-2, this.y, s*0.46);
+    ctx.shadowBlur=0;
+  }
+  radius(){ return this.size*0.6; }
+}
+
+function drawTri(x,y,s) {
+  ctx.beginPath();
+  ctx.moveTo(x+s, y);
+  ctx.lineTo(x-s*0.55, y-s*0.8);
+  ctx.lineTo(x-s*0.55, y+s*0.8);
+  ctx.closePath(); ctx.fill();
+}
+
+// ─────────────────────────────────────────────────────────────
+//  GATE
+// ─────────────────────────────────────────────────────────────
+class Gate {
+  constructor(x) {
+    this.x=x; this.prevX=x;
+    this.gapCY=H*0.17+Math.random()*H*0.66;
+    this.baseGap=120+Math.random()*30;
+    this.minGap=56;
+    this.phase=Math.random()*Math.PI*2;
+    this.bspd=2.1+Math.random()*0.8;
+    this.rings=[]; this.scored=false; this.wasOpen=false;
+    this.bw=14;
+  }
+  open()   { return (Math.sin(this.phase)+1)/2; }
+  gap()    { return this.minGap+this.open()*(this.baseGap-this.minGap); }
+  gapTop() { return this.gapCY-this.gap()/2; }
+  gapBot() { return this.gapCY+this.gap()/2; }
+
+  update(dt) {
+    this.prevX=this.x;
+    this.x-=scrollSpd*dt;
+    this.phase+=this.bspd*dt;
+    const open=this.open()>0.91;
+    if(open&&!this.wasOpen){
+      this.rings.push({r:5, life:1.0, cx:this.x, cy:this.gapCY});
+    }
+    this.wasOpen=open;
+    this.rings.forEach(rg=>{rg.r+=205*dt; rg.life-=1.25*dt; rg.cx-=scrollSpd*dt*0.07;});
+    this.rings=this.rings.filter(rg=>rg.life>0);
+  }
+
+  checkScore(px,py,pr) {
+    if(!this.scored && this.prevX>=px && this.x<px) {
+      this.scored=true;
+      return (py>this.gapTop()+pr*0.4 && py<this.gapBot()-pr*0.4);
+    }
+    return false;
+  }
+
+  draw() {
+    const gt=this.gapTop(), gb=this.gapBot();
+    const open=this.open()>0.5;
+    const col=open?'#ff00cc':'#880055';
+    const bw=this.bw;
+    // bars
+    ctx.shadowBlur=22; ctx.shadowColor=col; ctx.fillStyle=col;
+    if(gt>0)  ctx.fillRect(this.x-bw/2, 0, bw, Math.max(0,gt));
+    if(gb<H)  ctx.fillRect(this.x-bw/2, Math.min(H,gb), bw, Math.max(0,H-gb));
+    ctx.shadowBlur=0;
+    // gap edge glow lines
+    ctx.shadowBlur=6; ctx.shadowColor=open?'#ff88ee':'#550033';
+    ctx.strokeStyle=open?'rgba(255,136,238,0.85)':'rgba(85,0,51,0.5)';
+    ctx.lineWidth=1.5;
+    if(gt>2) {ctx.beginPath();ctx.moveTo(this.x-bw/2-3,gt);ctx.lineTo(this.x+bw/2+3,gt);ctx.stroke();}
+    if(gb<H-2){ctx.beginPath();ctx.moveTo(this.x-bw/2-3,gb);ctx.lineTo(this.x+bw/2+3,gb);ctx.stroke();}
+    ctx.shadowBlur=0;
+    // radial pulse rings
+    this.rings.forEach(rg=>{
+      if(rg.life<=0) return;
+      ctx.shadowBlur=12; ctx.shadowColor='#ff00cc';
+      // outer ring
+      ctx.strokeStyle=`rgba(255,0,204,${rg.life*0.58})`; ctx.lineWidth=2.5;
+      ctx.beginPath(); ctx.arc(rg.cx,rg.cy,rg.r,0,Math.PI*2); ctx.stroke();
+      // mid ring
+      ctx.strokeStyle=`rgba(255,100,220,${rg.life*0.35})`; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.arc(rg.cx,rg.cy,rg.r*0.62,0,Math.PI*2); ctx.stroke();
+      // inner ring
+      ctx.strokeStyle=`rgba(255,180,255,${rg.life*0.18})`; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.arc(rg.cx,rg.cy,rg.r*0.3,0,Math.PI*2); ctx.stroke();
+      ctx.shadowBlur=0;
+    });
+  }
+  offScreen(){ return this.x<-70; }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  OBSTACLE
+// ─────────────────────────────────────────────────────────────
+class Obstacle {
+  constructor(x) {
+    this.x=x; this.y=H*0.1+Math.random()*H*0.8;
+    this.w=13+Math.random()*22; this.h=13+Math.random()*22;
+    this.rot=Math.random()*Math.PI;
+    this.rspd=(Math.random()-0.5)*3.8;
+    this.hue=[38,200,280][Math.floor(Math.random()*3)];
+    this.smul=0.62+Math.random()*0.58;
+    this.vy=(Math.random()-0.5)*38;
+  }
+  update(dt) {
+    this.x-=scrollSpd*this.smul*dt;
+    this.y+=this.vy*dt; this.rot+=this.rspd*dt;
+    if(this.y<this.h+5||this.y>H-this.h-5) this.vy*=-1;
+  }
+  draw() {
+    ctx.save();
+    ctx.translate(this.x,this.y); ctx.rotate(this.rot);
+    const col=`hsl(${this.hue},100%,62%)`;
+    ctx.shadowBlur=16; ctx.shadowColor=col; ctx.fillStyle=col;
+    ctx.fillRect(-this.w/2,-this.h/2,this.w,this.h);
+    ctx.fillStyle=`hsl(${this.hue},100%,88%)`;
+    ctx.fillRect(-this.w/4,-this.h/4,this.w/2,this.h/2);
+    ctx.shadowBlur=0; ctx.restore();
+  }
+  offScreen(){ return this.x<-80; }
+  overlaps(px,py,pr){
+    const hw=this.w*0.56, hh=this.h*0.56;
+    const nx=Math.max(this.x-hw,Math.min(this.x+hw,px));
+    const ny=Math.max(this.y-hh,Math.min(this.y+hh,py));
+    return Math.hypot(px-nx,py-ny)<pr;
+  }
+}
+
+// circle vs AABB
+function circRect(cx,cy,r,rx,ry,rw,rh){
+  const nx=Math.max(rx,Math.min(rx+rw,cx));
+  const ny=Math.max(ry,Math.min(ry+rh,cy));
+  return Math.hypot(cx-nx,cy-ny)<r;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  PARTICLES
+// ─────────────────────────────────────────────────────────────
+let parts=[];
+function burst(x,y,col,n,spd=165){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2;
+    const s=spd*(0.35+Math.random()*0.65);
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,
+                life:1,decay:0.5+Math.random()*0.95,sz:2+Math.random()*5,col});
+  }
+}
+function updateParts(dt){
+  parts.forEach(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=p.decay*dt;});
+  parts=parts.filter(p=>p.life>0);
+}
+function drawParts(){
+  parts.forEach(p=>{
+    ctx.globalAlpha=p.life;
+    ctx.shadowBlur=5; ctx.shadowColor=p.col; ctx.fillStyle=p.col;
+    ctx.fillRect(p.x-p.sz/2,p.y-p.sz/2,p.sz,p.sz);
+  });
+  ctx.globalAlpha=1; ctx.shadowBlur=0;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  SCORE POPUPS
+// ─────────────────────────────────────────────────────────────
+let popups=[];
+function showPopup(x,y,txt){popups.push({x,y,txt,life:1.5,vy:-58});}
+function updatePopups(dt){
+  popups.forEach(p=>{p.life-=dt;p.y+=p.vy*dt;});
+  popups=popups.filter(p=>p.life>0);
+}
+function drawPopups(){
+  popups.forEach(p=>{
+    ctx.globalAlpha=Math.min(1,p.life*2);
+    ctx.shadowBlur=9; ctx.shadowColor='#00e5ff'; ctx.fillStyle='#00e5ff';
+    ctx.font='bold 15px Courier New';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(p.txt,p.x,p.y);
+  });
+  ctx.globalAlpha=1; ctx.shadowBlur=0;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  STARS
+// ─────────────────────────────────────────────────────────────
+let stars=[];
+function initStars(){
+  stars=[];
+  for(let i=0;i<95;i++)
+    stars.push({x:Math.random()*W, y:Math.random()*H,
+                sz:0.5+Math.random()*1.8,
+                spd:0.03+Math.random()*0.14,
+                a:0.22+Math.random()*0.72});
+}
+function drawStars(){
+  stars.forEach(st=>{
+    st.x-=scrollSpd*st.spd*(1/60);
+    if(st.x<0){st.x=W;st.y=Math.random()*H;}
+    ctx.globalAlpha=st.a; ctx.fillStyle='#aabbff';
+    ctx.fillRect(st.x-st.sz/2,st.y-st.sz/2,st.sz,st.sz);
+  });
+  ctx.globalAlpha=1;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  BACKGROUND
+// ─────────────────────────────────────────────────────────────
+function drawBg(){
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#04041a');
+  g.addColorStop(0.42,'#07071f');
+  g.addColorStop(1,'#080810');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  // scanlines
+  ctx.fillStyle='rgba(0,0,0,0.14)';
+  for(let y=0;y<H;y+=4) ctx.fillRect(0,y,W,2);
+  drawStars();
+  // horizon pulse glow
+  const hg=ctx.createLinearGradient(0,H*0.36,0,H*0.74);
+  hg.addColorStop(0,'rgba(80,0,140,0)');
+  hg.addColorStop(0.5,'rgba(80,0,140,0.06)');
+  hg.addColorStop(1,'rgba(80,0,140,0)');
+  ctx.fillStyle=hg; ctx.fillRect(0,H*0.36,W,H*0.38);
+}
+
+function drawSpeedLines(){
+  if(speedLevel<=1) return;
+  const intensity=Math.min(0.32,(speedLevel-1)*0.1);
+  ctx.strokeStyle=`rgba(0,229,255,${intensity*0.28})`; ctx.lineWidth=1;
+  for(let i=0;i<7;i++){
+    const y=(Math.random()*H)|0;
+    const len=18+Math.random()*90;
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(len,y); ctx.stroke();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  HUD + DASH BAR
+// ─────────────────────────────────────────────────────────────
+function updateHUD(){
+  document.getElementById('hSc').textContent=score;
+  document.getElementById('hCo').textContent=`×${Math.min(combo,8)}`;
+  document.getElementById('hSp').textContent=speedLevel;
+  const cd=player?player.dashCD:0;
+  document.getElementById('hDa').textContent=cd>0.05?cd.toFixed(1)+'s':'READY';
+}
+
+function drawDashBar(){
+  const cd=player.dashCD/player.dashCDMax;
+  const bw=100;
+  ctx.fillStyle='#0e0e2a'; ctx.fillRect(20,H-13,bw,5);
+  ctx.shadowBlur=9;
+  ctx.shadowColor=cd<0.01?'#ff00cc':'#2a0a33';
+  ctx.fillStyle=cd<0.01?'#ff00cc':'#4a1155';
+  ctx.fillRect(20,H-13,bw*(1-cd),5); ctx.shadowBlur=0;
+  ctx.fillStyle='rgba(0,229,255,0.38)';
+  ctx.font='10px Courier New'; ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText('DASH',20,H-22);
+  ctx.textAlign='right';
+  ctx.fillText(Math.floor(elapsed)+'s',W-20,H-22);
+}
+
+// ─────────────────────────────────────────────────────────────
+//  GAME STATE
+// ─────────────────────────────────────────────────────────────
+let player, gates, obstacles;
+let score, combo, bestCombo, scrollSpd, speedLevel;
+let gateT, gateI, obsT, obsI, speedT, elapsed;
+let gameOn=false, raf=null, lastTS=0;
+
+function startGame(){
+  OV.style.display='none';
+  player=new Player();
+  gates=[]; obstacles=[]; parts=[]; popups=[];
+  score=0; combo=1; bestCombo=1;
+  scrollSpd=200; speedLevel=1;
+  gateT=1.8; gateI=2.9;
+  obsT=10;   obsI=5.5;
+  speedT=20; elapsed=0;
+  gameOn=true; initStars(); updateHUD();
+  if(raf) cancelAnimationFrame(raf);
+  lastTS=performance.now();
+  raf=requestAnimationFrame(loop);
+}
+
+function killPlayer(){
+  if(!player||player.dead) return;
+  player.dead=true;
+  burst(player.x,player.y,'#00e5ff',30,250);
+  burst(player.x,player.y,'#ffffff',14,440);
+  setTimeout(()=>{if(!gameOn)return;endGame();},1100);
+}
+
+function endGame(){
+  gameOn=false;
+  OV.style.display='flex';
+  OV.innerHTML=`
+    <h1 style="color:#ff3333;text-shadow:0 0 24px #ff3333">SIGNAL LOST</h1>
+    <div class="sub">PULSE GATE SEQUENCE TERMINATED</div>
+    <div class="sub" style="font-size:17px;margin:14px 0;color:#ff00cc">FINAL SCORE: ${score}</div>
+    <div class="sub">SURVIVED: ${Math.floor(elapsed)}s &nbsp;·&nbsp; BEST COMBO: ×${bestCombo}</div>
+    <button class="btn" onclick="startGame()">TRY AGAIN</button>
+  `;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  MAIN LOOP
+// ─────────────────────────────────────────────────────────────
+function loop(ts){
+  const dt=Math.min((ts-lastTS)/1000,0.05);
+  lastTS=ts;
+
+  if(gameOn&&!player.dead){
+    elapsed+=dt; speedT-=dt;
+    if(speedT<=0){
+      scrollSpd+=24; speedLevel++;
+      gateI=Math.max(1.65,gateI-0.18);
+      obsI =Math.max(2.6, obsI -0.38);
+      speedT=20;
+    }
+    // spawn gates
+    gateT-=dt;
+    if(gateT<=0){gates.push(new Gate(W+65));gateT=gateI*(0.8+Math.random()*0.4);}
+    // spawn obstacles after 10s
+    if(elapsed>10){obsT-=dt; if(obsT<=0){obstacles.push(new Obstacle(W+45));obsT=obsI*(0.7+Math.random()*0.6);}}
+
+    player.update(dt);
+    gates.forEach(g=>g.update(dt));
+    obstacles.forEach(o=>o.update(dt));
+
+    // scoring + collision
+    const px=player.x, py=player.y, pr=player.radius();
+
+    for(const g of gates){
+      // score check
+      if(g.checkScore(px,py,pr)){
+        combo++; if(combo>bestCombo)bestCombo=combo;
+        const pts=10*Math.min(combo,8);
+        score+=pts;
+        showPopup(px+35,py-28,`+${pts} ×${Math.min(combo,8)}`);
+      }
+      // collision check (skip when dashing)
+      if(!player.dashing){
+        const bw=g.bw, gt=g.gapTop(), gb=g.gapBot();
+        if(gt>0 && circRect(px,py,pr,g.x-bw/2,0,bw,gt)){killPlayer();break;}
+        if(gb<H && circRect(px,py,pr,g.x-bw/2,gb,bw,H-gb)){killPlayer();break;}
+      }
+    }
+    if(!player.dead&&!player.dashing){
+      for(const o of obstacles){
+        if(o.overlaps(px,py,pr)){killPlayer();break;}
+      }
+    }
+
+    gates=gates.filter(g=>!g.offScreen());
+    obstacles=obstacles.filter(o=>!o.offScreen());
+    updateParts(dt); updatePopups(dt);
+    if((ts|0)%8===0)updateHUD();
+  } else if(player&&player.dead){
+    player.update(dt);
+    updateParts(dt);
+  }
+
+  // ─── RENDER ────────────────────────────────────────────────
+  drawBg();
+  if(speedLevel>=2)drawSpeedLines();
+  gates.forEach(g=>g.draw());
+  obstacles.forEach(o=>o.draw());
+  drawParts();
+  if(player)player.draw();
+  drawPopups();
+  if(player&&!player.dead)drawDashBar();
+
+  raf=requestAnimationFrame(loop);
+}
+
+// kick off render
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

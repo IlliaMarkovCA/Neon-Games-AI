@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neon Dash</title>
+<style>
+  :root {
+    --cyan: #00ffe1;
+    --pink: #ff2bd6;
+    --yellow: #ffe600;
+    --bg: #05050f;
+    --panel: #0c0c1e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%; background: var(--bg);
+    font-family: 'Courier New', monospace;
+    color: var(--cyan); overflow: hidden;
+  }
+  #wrap {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    height: 100%; gap: 10px;
+  }
+  #topbar {
+    display: flex; align-items: center; gap: 20px;
+    width: 100%; max-width: 900px; padding: 0 8px;
+    letter-spacing: 2px; font-size: 15px;
+    text-shadow: 0 0 8px rgba(0,255,225,0.5);
+  }
+  #progressOuter {
+    flex: 1; height: 10px;
+    background: var(--panel);
+    border: 1px solid var(--cyan);
+  }
+  #progressInner {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, var(--cyan), var(--pink));
+    transition: width 0.05s linear;
+  }
+  #attempts { color: #7d8bb8; }
+
+  #gameCanvas {
+    border: 2px solid var(--cyan);
+    box-shadow: 0 0 28px rgba(0,255,225,0.2);
+    max-width: 95vw; max-height: 70vh;
+    cursor: pointer;
+  }
+  #hint {
+    font-size: 13px; color: #7d8bb8;
+    letter-spacing: 1px; text-align: center;
+  }
+  #hint b { color: var(--cyan); }
+
+  /* Overlay */
+  #overlay {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; text-align: center;
+    background: rgba(5,5,15,0.87);
+  }
+  #overlay.hidden { display: none; }
+  #overlay h1 {
+    font-size: clamp(26px, 5.5vw, 50px);
+    letter-spacing: 8px; margin-bottom: 10px;
+    color: var(--cyan);
+    text-shadow: 0 0 20px rgba(0,255,225,0.55);
+  }
+  #overlay p {
+    color: #9aa6c4; font-size: 14px;
+    line-height: 1.7; max-width: 420px;
+  }
+  #overlay p b { color: var(--pink); }
+  #overlayBtn {
+    margin-top: 22px; padding: 12px 36px;
+    background: transparent; border: 2px solid var(--pink);
+    color: var(--pink); font-family: inherit;
+    font-size: 16px; letter-spacing: 4px; cursor: pointer;
+    text-shadow: 0 0 8px rgba(255,43,214,0.5);
+    transition: background 0.15s, color 0.15s;
+  }
+  #overlayBtn:hover { background: var(--pink); color: var(--bg); }
+  #overlayScore { margin-top: 8px; font-size: 13px; color: #7d8bb8; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="topbar">
+    <span>PROGRESS</span>
+    <div id="progressOuter"><div id="progressInner"></div></div>
+    <span id="attempts">ATT: 0</span>
+  </div>
+
+  <div style="position:relative;">
+    <canvas id="gameCanvas" width="900" height="500"></canvas>
+    <div id="overlay">
+      <h1 id="overlayTitle">NEON DASH</h1>
+      <p id="overlayMsg">
+        Auto-run through the neon grid.<br>
+        <b>SPACE</b> or <b>click</b> to jump. Double-jump allowed!<br>
+        Clear the level without hitting a spike.
+      </p>
+      <button id="overlayBtn">START</button>
+      <div id="overlayScore"></div>
+    </div>
+  </div>
+
+  <div id="hint">Press <b>SPACE</b> or <b>click</b> to jump · Double-jump allowed</div>
+</div>
+
+<script>
+/* =========================================================
+   NEON DASH — Geometry-Dash-style one-level auto-runner
+   Pure HTML5 Canvas, zero dependencies.
+   ========================================================= */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// ── constants ────────────────────────────────────────────
+const GROUND_Y    = H - 90;   // y of the ground surface
+const TILE        = 46;        // base grid/block size
+const SCROLL_SPD  = 5.2;       // px per frame (world scrolls left)
+const GRAVITY     = 0.72;
+const JUMP_V      = -14.5;
+const MAX_JUMPS   = 2;
+
+const COL_BG      = '#05050f';
+const COL_CYAN    = '#00ffe1';
+const COL_PINK    = '#ff2bd6';
+const COL_YELLOW  = '#ffe600';
+const COL_GROUND  = '#1b1b35';
+const COL_DARK    = '#0c0c1e';
+
+// ── level design ─────────────────────────────────────────
+// Each entry: [type, xTile, yTile]
+//   type: 'spike' | 'block' | 'low_block' | 'coin'
+//   xTile: x in tile units from level start
+//   yTile: 0 = on ground; positive = stacked up; negative = floating platforms
+//
+// The level is ~240 tiles wide (≈ 90s at 5.2px/frame × 60fps).
+// We also store PLATFORM entries separately: [xTile, yTile, widthTiles]
+
+const LEVEL_TILES = 230; // total level length in tiles
+const LEVEL_PX    = LEVEL_TILES * TILE;
+
+// Obstacles: {type, x (world px), y (world px), w, h}
+// We'll compute them from the design below
+const DESIGN = [
+  // warm-up gap
+  { t:'spike', x:12 },
+  { t:'spike', x:14 },
+  { t:'spike', x:16 },
+
+  // block jump
+  { t:'block', x:22, stack:2 },
+  { t:'spike', x:25 },
+
+  // coins reward
+  { t:'coin',  x:28, yOff:-2 },
+  { t:'coin',  x:29, yOff:-2 },
+  { t:'coin',  x:30, yOff:-2 },
+
+  // cluster
+  { t:'spike', x:34 },
+  { t:'spike', x:36 },
+  { t:'block', x:38, stack:1 },
+  { t:'spike', x:40 },
+
+  // platform over spikes
+  { t:'platform', x:46, yStack:3, w:3 },
+  { t:'spike', x:46 },
+  { t:'spike', x:47 },
+  { t:'spike', x:48 },
+
+  // longer gap
+  { t:'spike', x:54 },
+  { t:'spike', x:55 },
+  { t:'spike', x:56 },
+  { t:'spike', x:57 },
+
+  // stacked blocks
+  { t:'block', x:62, stack:3 },
+  { t:'block', x:63, stack:3 },
+  { t:'spike', x:65 },
+
+  // coins floating high
+  { t:'coin',  x:70, yOff:-4 },
+  { t:'coin',  x:72, yOff:-4 },
+  { t:'coin',  x:74, yOff:-4 },
+
+  // tight spikes
+  { t:'spike', x:78 },
+  { t:'spike', x:80 },
+  { t:'spike', x:82 },
+  { t:'spike', x:83 },
+
+  // big block wall + platform
+  { t:'block', x:88, stack:4 },
+  { t:'platform', x:88, yStack:5, w:4 },
+  { t:'spike', x:93 },
+
+  // breather + coin row
+  { t:'coin',  x:98, yOff:-1 },
+  { t:'coin',  x:100, yOff:-1 },
+  { t:'coin',  x:102, yOff:-1 },
+
+  // double spike clusters
+  { t:'spike', x:106 },
+  { t:'spike', x:108 },
+  { t:'spike', x:110 },
+  { t:'spike', x:112 },
+
+  // platform maze
+  { t:'platform', x:116, yStack:2, w:2 },
+  { t:'spike', x:116 },
+  { t:'spike', x:117 },
+  { t:'platform', x:120, yStack:4, w:2 },
+  { t:'spike', x:120 },
+  { t:'spike', x:121 },
+
+  // long spike field
+  { t:'spike', x:126 },
+  { t:'spike', x:127 },
+  { t:'spike', x:128 },
+  { t:'spike', x:129 },
+  { t:'spike', x:130 },
+
+  // coins after hard section
+  { t:'coin',  x:134, yOff:-2 },
+  { t:'coin',  x:136, yOff:-2 },
+  { t:'coin',  x:138, yOff:-2 },
+
+  // tower jump
+  { t:'block', x:142, stack:5 },
+  { t:'spike', x:145 },
+  { t:'spike', x:146 },
+
+  // final gauntlet
+  { t:'spike', x:152 },
+  { t:'spike', x:154 },
+  { t:'spike', x:155 },
+  { t:'spike', x:156 },
+  { t:'spike', x:158 },
+  { t:'spike', x:160 },
+  { t:'spike', x:162 },
+  { t:'platform', x:164, yStack:3, w:3 },
+  { t:'spike', x:164 },
+  { t:'spike', x:165 },
+  { t:'spike', x:166 },
+  { t:'spike', x:168 },
+  { t:'spike', x:170 },
+
+  // final coins + end
+  { t:'coin',  x:178, yOff:-1 },
+  { t:'coin',  x:180, yOff:-1 },
+  { t:'coin',  x:182, yOff:-1 },
+  { t:'coin',  x:184, yOff:-1 },
+  { t:'coin',  x:186, yOff:-1 },
+];
+
+// Build obstacle list from design
+function buildLevel() {
+  const obs = [];
+  for (const d of DESIGN) {
+    const wx = 200 + d.x * TILE; // world-x (200px intro gap)
+    if (d.t === 'spike') {
+      // Triangle spike: base on ground, apex up
+      obs.push({ type:'spike', wx, wy: GROUND_Y, w: TILE * 0.9, h: TILE * 0.9 });
+    } else if (d.t === 'block') {
+      const s = d.stack || 1;
+      for (let i = 0; i < s; i++) {
+        obs.push({ type:'block', wx, wy: GROUND_Y - i * TILE, w: TILE, h: TILE });
+      }
+    } else if (d.t === 'platform') {
+      const wy = GROUND_Y - (d.yStack || 2) * TILE;
+      for (let i = 0; i < (d.w || 2); i++) {
+        obs.push({ type:'platform', wx: wx + i * TILE, wy, w: TILE, h: TILE * 0.35 });
+      }
+    } else if (d.t === 'coin') {
+      const yOff = (d.yOff || -1) * TILE;
+      obs.push({ type:'coin', wx, wy: GROUND_Y + yOff, w: 18, h: 18, collected: false });
+    }
+  }
+  return obs;
+}
+
+// ── state ────────────────────────────────────────────────
+let obstacles, particles, cameraX;
+let player, gameState, attempts, totalCoins, collectedCoins;
+
+function initState() {
+  obstacles      = buildLevel();
+  particles      = [];
+  cameraX        = 0;
+  totalCoins     = obstacles.filter(o => o.type === 'coin').length;
+  collectedCoins = 0;
+
+  player = {
+    x: 120,        // screen-fixed x position
+    y: GROUND_Y - TILE,
+    vy: 0,
+    jumpsLeft: MAX_JUMPS,
+    onGround: false,
+    glowPhase: 0,  // for pulsing glow
+    rotation: 0,   // spinning angle while in air
+    dead: false,
+  };
+
+  gameState = 'playing'; // 'playing' | 'dead' | 'win'
+}
+
+// ── input ────────────────────────────────────────────────
+let jumpQueued = false;
+
+function doJump() {
+  if (gameState !== 'playing') return;
+  if (player.jumpsLeft > 0) {
+    player.vy = JUMP_V;
+    player.jumpsLeft--;
+    jumpQueued = false;
+    spawnJumpParticles();
+  }
+}
+
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); doJump(); }
+});
+canvas.addEventListener('click', doJump);
+canvas.addEventListener('touchstart', e => { e.preventDefault(); doJump(); }, { passive: false });
+
+// ── particles ────────────────────────────────────────────
+function spawnParticles(x, y, color, count, speed, life) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const v = speed * (0.4 + Math.random() * 0.6);
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * v,
+      vy: Math.sin(angle) * v - speed * 0.3,
+      life, maxLife: life,
+      color, size: 3 + Math.random() * 4
+    });
+  }
+}
+
+function spawnDeathParticles(x, y) {
+  spawnParticles(x, y, COL_CYAN,   14, 7, 40);
+  spawnParticles(x, y, COL_PINK,   10, 5, 30);
+  spawnParticles(x, y, COL_YELLOW,  6, 9, 25);
+}
+
+function spawnJumpParticles() {
+  const sx = player.x + TILE / 2;
+  const sy = player.y + TILE;
+  spawnParticles(sx, sy, COL_CYAN, 5, 3.5, 18);
+}
+
+function spawnCoinParticles(x, y) {
+  spawnParticles(x, y, COL_YELLOW, 8, 4, 22);
+}
+
+// ── update ────────────────────────────────────────────────
+function update() {
+  if (gameState !== 'playing') {
+    updateParticles();
+    return;
+  }
+
+  // Scroll world
+  cameraX += SCROLL_SPD;
+
+  // Gravity
+  player.vy += GRAVITY;
+  player.y  += player.vy;
+
+  // Ground collision
+  if (player.y >= GROUND_Y - TILE) {
+    player.y = GROUND_Y - TILE;
+    player.vy = 0;
+    player.onGround = true;
+    player.jumpsLeft = MAX_JUMPS;
+    player.rotation = 0; // snap rotation when landing
+  } else {
+    player.onGround = false;
+    player.rotation += 0.09; // spin in air
+  }
+
+  // Clamp above canvas top
+  if (player.y < 0) {
+    player.y = 0;
+    player.vy = 1;
+  }
+
+  // Glow pulse
+  player.glowPhase += player.onGround ? 0.05 : 0.12;
+
+  // World-x of the player (for collision, progress, etc.)
+  const playerWX = cameraX + player.x;
+
+  // Progress bar
+  const pct = Math.min(100, (cameraX / LEVEL_PX) * 100);
+  document.getElementById('progressInner').style.width = pct + '%';
+
+  // Win condition: scrolled past level end
+  if (cameraX > LEVEL_PX + W) {
+    gameState = 'win';
+    showOverlay(true);
+    return;
+  }
+
+  // Obstacle logic
+  for (const o of obstacles) {
+    // Screen x of obstacle
+    const sx = o.wx - cameraX;
+
+    // Cull far-off objects
+    if (sx > W + 100 || sx < -200) continue;
+
+    if (o.type === 'coin' && !o.collected) {
+      // Coin collect (generous radius)
+      const cx = sx + o.w / 2, cy = o.wy + o.h / 2;
+      const px = player.x + TILE / 2, py = player.y + TILE / 2;
+      if (Math.hypot(px - cx, py - cy) < TILE * 0.8) {
+        o.collected = true;
+        collectedCoins++;
+        spawnCoinParticles(cx, cy);
+      }
+      continue;
+    }
+
+    if (o.type === 'spike') {
+      // Triangle hit: use a tighter box than full tile
+      const hb = { x: sx + o.w * 0.15, y: o.wy - o.h + 6, w: o.w * 0.7, h: o.h - 6 };
+      if (rectsOverlap(
+        { x: player.x + 3, y: player.y + 3, w: TILE - 6, h: TILE - 6 },
+        hb
+      )) { killPlayer(); return; }
+    }
+
+    if (o.type === 'block') {
+      const bx = sx, by = o.wy - o.h;
+      // Platform landing (top surface)
+      const px = player.x, py = player.y, pw = TILE, ph = TILE;
+      const prevBottom = player.y + ph - player.vy; // where bottom was last frame
+
+      if (
+        px + pw > bx + 4 && px < bx + o.w - 4 &&
+        py + ph >= by && prevBottom <= by + 4 &&
+        player.vy >= 0
+      ) {
+        player.y = by - ph;
+        player.vy = 0;
+        player.onGround = true;
+        player.jumpsLeft = MAX_JUMPS;
+        player.rotation = 0;
+      } else if (rectsOverlap(
+        { x: player.x + 3, y: player.y + 3, w: TILE - 6, h: TILE - 6 },
+        { x: bx + 3, y: by + 3, w: o.w - 6, h: o.h - 6 }
+      )) {
+        killPlayer(); return;
+      }
+    }
+
+    if (o.type === 'platform') {
+      const bx = sx, by = o.wy;
+      const pw = TILE, ph = TILE;
+      const prevBottom = player.y + ph - player.vy;
+
+      if (
+        player.x + pw > bx + 2 && player.x < bx + o.w - 2 &&
+        player.y + ph >= by && prevBottom <= by + 6 &&
+        player.vy >= 0
+      ) {
+        player.y = by - ph;
+        player.vy = 0;
+        player.onGround = true;
+        player.jumpsLeft = MAX_JUMPS;
+        player.rotation = 0;
+      }
+    }
+  }
+
+  updateParticles();
+}
+
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x &&
+         a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function killPlayer() {
+  if (player.dead) return;
+  player.dead = true;
+  gameState = 'dead';
+  spawnDeathParticles(player.x + TILE / 2, player.y + TILE / 2);
+  attempts++;
+  document.getElementById('attempts').textContent = 'ATT: ' + attempts;
+  setTimeout(() => showOverlay(false), 700);
+}
+
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x  += p.vx;
+    p.y  += p.vy;
+    p.vy += 0.25; // particle gravity
+    p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// ── draw ──────────────────────────────────────────────────
+function drawBackground() {
+  // Base fill
+  ctx.fillStyle = COL_BG;
+  ctx.fillRect(0, 0, W, H);
+
+  // Parallax neon grid (moves slower than world for depth)
+  const gridScroll = cameraX * 0.18;
+  const gridSize   = 60;
+  ctx.strokeStyle = 'rgba(0,255,225,0.06)';
+  ctx.lineWidth   = 1;
+
+  // Vertical lines
+  const startX = -(gridScroll % gridSize);
+  for (let x = startX; x < W; x += gridSize) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, GROUND_Y);
+    ctx.stroke();
+  }
+  // Horizontal lines (converge toward horizon — fake perspective)
+  const horizon = GROUND_Y * 0.28;
+  for (let row = 0; row < 8; row++) {
+    const t  = row / 7;
+    const y  = horizon + (GROUND_Y - horizon) * (t * t);
+    const shrink = 1 - t * 0.85;
+    ctx.globalAlpha = 0.04 + t * 0.08;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - (W / 2) / shrink, y);
+    ctx.lineTo(W / 2 + (W / 2) / shrink, y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // Horizon glow band
+  const hGrad = ctx.createLinearGradient(0, GROUND_Y * 0.6, 0, GROUND_Y);
+  hGrad.addColorStop(0, 'rgba(255,43,214,0)');
+  hGrad.addColorStop(1, 'rgba(255,43,214,0.07)');
+  ctx.fillStyle = hGrad;
+  ctx.fillRect(0, GROUND_Y * 0.6, W, GROUND_Y * 0.4);
+}
+
+function drawGround() {
+  // Ground block
+  ctx.fillStyle = COL_GROUND;
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+
+  // Ground top edge glow
+  const grad = ctx.createLinearGradient(0, GROUND_Y - 3, 0, GROUND_Y + 6);
+  grad.addColorStop(0, COL_CYAN);
+  grad.addColorStop(1, 'rgba(0,255,225,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, GROUND_Y - 2, W, 8);
+
+  // Scrolling grid lines on the ground surface
+  const tileScroll = cameraX % TILE;
+  ctx.strokeStyle = 'rgba(0,255,225,0.12)';
+  ctx.lineWidth = 1;
+  for (let x = -tileScroll; x < W + TILE; x += TILE) {
+    ctx.beginPath();
+    ctx.moveTo(x, GROUND_Y);
+    ctx.lineTo(x, H);
+    ctx.stroke();
+  }
+}
+
+function drawObstacles() {
+  for (const o of obstacles) {
+    const sx = o.wx - cameraX;
+    if (sx > W + 80 || sx < -80) continue;
+
+    if (o.type === 'spike') {
+      // Pink neon spike triangle
+      const bx = sx, by = o.wy, w = o.w, h = o.h;
+      ctx.save();
+      ctx.shadowColor = COL_PINK;
+      ctx.shadowBlur  = 12;
+      ctx.fillStyle   = COL_PINK;
+      ctx.beginPath();
+      ctx.moveTo(bx,          by);        // bottom-left
+      ctx.lineTo(bx + w,      by);        // bottom-right
+      ctx.lineTo(bx + w / 2,  by - h);   // apex
+      ctx.closePath();
+      ctx.fill();
+      // Inner lighter spike
+      ctx.fillStyle = 'rgba(255,255,255,0.25)';
+      ctx.beginPath();
+      ctx.moveTo(bx + w * 0.2,  by - 2);
+      ctx.lineTo(bx + w * 0.8,  by - 2);
+      ctx.lineTo(bx + w / 2,    by - h * 0.8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    else if (o.type === 'block') {
+      const bx = sx, by = o.wy - o.h;
+      ctx.save();
+      ctx.shadowColor = COL_CYAN;
+      ctx.shadowBlur  = 8;
+      // Fill
+      ctx.fillStyle = '#1a1a40';
+      ctx.fillRect(bx, by, o.w, o.h);
+      // Border
+      ctx.strokeStyle = COL_CYAN;
+      ctx.lineWidth   = 2;
+      ctx.strokeRect(bx + 1, by + 1, o.w - 2, o.h - 2);
+      // Inner cross detail
+      ctx.strokeStyle = 'rgba(0,255,225,0.2)';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(bx + o.w / 2, by);
+      ctx.lineTo(bx + o.w / 2, by + o.h);
+      ctx.moveTo(bx, by + o.h / 2);
+      ctx.lineTo(bx + o.w, by + o.h / 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    else if (o.type === 'platform') {
+      const bx = sx, by = o.wy;
+      ctx.save();
+      ctx.shadowColor = COL_CYAN;
+      ctx.shadowBlur  = 10;
+      ctx.fillStyle   = '#0e2233';
+      ctx.fillRect(bx, by, o.w, o.h);
+      ctx.strokeStyle = COL_CYAN;
+      ctx.lineWidth   = 2;
+      ctx.strokeRect(bx, by, o.w, o.h);
+      ctx.restore();
+    }
+
+    else if (o.type === 'coin' && !o.collected) {
+      const cx = sx + o.w / 2, cy = o.wy + o.h / 2;
+      const pulse = 0.8 + 0.2 * Math.sin(Date.now() * 0.004 + o.wx * 0.05);
+      ctx.save();
+      ctx.shadowColor = COL_YELLOW;
+      ctx.shadowBlur  = 14 * pulse;
+      ctx.fillStyle   = COL_YELLOW;
+      ctx.beginPath();
+      ctx.arc(cx, cy, o.w / 2 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.beginPath();
+      ctx.arc(cx - 3, cy - 3, o.w / 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+function drawPlayer() {
+  if (player.dead && gameState !== 'playing') {
+    // Don't draw cube after death — just particles
+    return;
+  }
+
+  const px = player.x, py = player.y;
+  const cx = px + TILE / 2, cy = py + TILE / 2;
+  const glow = 10 + 8 * Math.abs(Math.sin(player.glowPhase));
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(player.rotation);
+
+  // Glow shadow
+  ctx.shadowColor = COL_CYAN;
+  ctx.shadowBlur  = glow;
+
+  // Body
+  const bodyGrad = ctx.createLinearGradient(-TILE/2, -TILE/2, TILE/2, TILE/2);
+  bodyGrad.addColorStop(0, '#00ffe1');
+  bodyGrad.addColorStop(1, '#0099aa');
+  ctx.fillStyle = bodyGrad;
+  roundRect(ctx, -TILE/2, -TILE/2, TILE, TILE, 6);
+  ctx.fill();
+
+  // Inner detail — concentric square
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth   = 1.5;
+  roundRect(ctx, -TILE/2 + 7, -TILE/2 + 7, TILE - 14, TILE - 14, 3);
+  ctx.stroke();
+
+  // Center dot
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.beginPath();
+  ctx.arc(0, 0, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle   = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur  = 6;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur  = 0;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function render() {
+  drawBackground();
+  drawGround();
+  drawObstacles();
+  drawPlayer();
+  drawParticles();
+}
+
+// ── overlay / flow ────────────────────────────────────────
+const overlay    = document.getElementById('overlay');
+const overlayTitle = document.getElementById('overlayTitle');
+const overlayMsg   = document.getElementById('overlayMsg');
+const overlayBtn   = document.getElementById('overlayBtn');
+const overlayScore = document.getElementById('overlayScore');
+
+attempts = 0;
+
+function showOverlay(won) {
+  if (won) {
+    overlayTitle.textContent = 'LEVEL CLEAR!';
+    overlayMsg.innerHTML =
+      `You cleared the level in <b>${attempts + 1}</b> attempt${attempts + 1 !== 1 ? 's' : ''}!`;
+    overlayScore.textContent =
+      `Coins collected: ${collectedCoins} / ${totalCoins}`;
+  } else {
+    overlayTitle.textContent = 'CRASHED';
+    overlayMsg.innerHTML =
+      `Attempt <b>${attempts}</b> ended. Keep going!`;
+    overlayScore.textContent =
+      `Coins: ${collectedCoins} / ${totalCoins}`;
+  }
+  overlayBtn.textContent = won ? 'PLAY AGAIN' : 'RETRY';
+  overlay.classList.remove('hidden');
+}
+
+function startGame() {
+  overlay.classList.add('hidden');
+  collectedCoins = 0; // reset coins each attempt? keep persistent: don't reset
+  // Actually for GD style, restart from beginning but keep attempt counter
+  initState();
+  // restore attempt count
+  // (initState doesn't touch attempts)
+}
+
+overlayBtn.addEventListener('click', () => {
+  startGame();
+});
+
+// ── main loop ─────────────────────────────────────────────
+function loop() {
+  update();
+  render();
+  requestAnimationFrame(loop);
+}
+
+initState();
+render(); // initial frame behind overlay
+loop();
+</script>
+</body>
+</html>

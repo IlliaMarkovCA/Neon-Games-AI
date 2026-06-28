@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Knife Spin</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#060614;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  min-height:100vh; font-family:'Courier New',monospace; color:#00e5ff;
+  user-select:none; overflow:hidden;
+}
+#hud {
+  display:flex; gap:44px; padding:14px 0 8px;
+  font-size:13px; letter-spacing:3px; text-transform:uppercase;
+}
+.val { color:#ff00cc; }
+canvas { display:block; border:1px solid rgba(0,229,255,0.45);
+  box-shadow:0 0 32px rgba(0,229,255,0.18),0 0 2px rgba(0,229,255,0.9); cursor:crosshair; }
+#ctrl { padding:9px 0 0; font-size:11px; color:rgba(0,229,255,0.38); letter-spacing:2px; }
+#ctrl b { color:rgba(0,229,255,0.72); font-weight:normal; }
+#overlay {
+  position:fixed; inset:0; background:rgba(6,6,20,0.94);
+  display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:10;
+}
+#overlay h1 {
+  font-size:28px; letter-spacing:8px; color:#00e5ff;
+  text-shadow:0 0 22px #00e5ff,0 0 55px rgba(0,229,255,0.3); margin-bottom:16px;
+}
+.sub { font-size:11px; letter-spacing:3px; color:rgba(0,229,255,0.48); margin:4px 0; }
+.btn {
+  margin-top:28px; padding:12px 50px; border:1px solid #00e5ff;
+  background:transparent; color:#00e5ff; font-family:'Courier New',monospace;
+  font-size:13px; letter-spacing:5px; cursor:pointer; text-transform:uppercase;
+  box-shadow:0 0 14px rgba(0,229,255,0.18); transition:all 0.2s;
+}
+.btn:hover { background:rgba(0,229,255,0.09); box-shadow:0 0 28px rgba(0,229,255,0.38); }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <span>LEVEL <span class="val" id="hLv">1</span></span>
+  <span>KNIVES <span class="val" id="hKn">0 / 5</span></span>
+  <span>SCORE <span class="val" id="hSc">0</span></span>
+</div>
+
+<canvas id="cv" width="900" height="520"></canvas>
+
+<div id="ctrl">Controls: <b>SPACE</b> or <b>CLICK</b> to throw a knife</div>
+
+<div id="overlay">
+  <h1>KNIFE SPIN</h1>
+  <div class="sub">STICK ALL KNIVES INTO THE SPINNING CIRCLE</div>
+  <div class="sub" style="color:rgba(255,0,204,0.48)">HIT AN EXISTING KNIFE OR OBSTACLE = GAME OVER</div>
+  <button class="btn" onclick="startGame()">ENGAGE</button>
+</div>
+
+<script>
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const OV = document.getElementById('overlay');
+
+// ── constants ────────────────────────────────────────────────
+const CX = 450, CY = 192;   // circle center
+const CR = 112;              // circle radius
+const BLADE = 56;            // blade length (outward from circle edge)
+const HANDLE = 19;           // handle length (inward)
+const FLY_SPEED = 680;       // knife pixels/sec
+const LAUNCH_Y  = 462;       // knife resting Y
+const MIN_ANG   = 0.16;      // knife–knife collision half-angle (rad)
+const OBS_ANG   = 0.27;      // knife–obstacle collision half-angle (rad)
+
+// ── levels ───────────────────────────────────────────────────
+const LEVELS = [
+  { n:5,  spd:1.1, dir: 1, obs:0, swing:false },
+  { n:7,  spd:1.6, dir: 1, obs:0, swing:false },
+  { n:9,  spd:2.0, dir: 1, obs:2, swing:false },
+  { n:11, spd:2.3, dir:-1, obs:3, swing:false },
+  { n:13, spd:2.6, dir: 1, obs:3, swing:true  },
+  { n:15, spd:2.9, dir:-1, obs:4, swing:true  },
+  { n:17, spd:3.2, dir: 1, obs:5, swing:true  },
+  { n:20, spd:3.6, dir: 1, obs:5, swing:true  },
+];
+
+function getLvl(n) {
+  const i = Math.min(n - 1, LEVELS.length - 1);
+  const b = LEVELS[i];
+  const ex = Math.max(0, n - LEVELS.length);
+  return { n: b.n + ex*2, spd: b.spd + ex*0.2,
+           dir: b.dir, obs: Math.min(7, b.obs + Math.floor(ex/2)), swing: b.swing };
+}
+
+// ── state ────────────────────────────────────────────────────
+let circAngle, circSpd, circDir, swingT;
+let stuckKnives, obstacles;
+let flyY;           // null = no knife in flight; number = current Y
+let level, score, gameOn;
+let parts = [];
+let shakeX = 0, shakeY = 0, shakeT = 0;
+let flashAlpha = 0;
+let transitioning = false, transT = 0;
+let lastTS = 0, raf;
+
+// ── helpers ──────────────────────────────────────────────────
+function wrapAng(a) {
+  a = a % (Math.PI * 2);
+  return a < 0 ? a + Math.PI * 2 : a;
+}
+function angDiff(a, b) {
+  let d = wrapAng(a - b);
+  return d > Math.PI ? d - Math.PI * 2 : d;
+}
+
+// ── particles ────────────────────────────────────────────────
+function burst(x, y, col, n, spd = 160) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = spd * (0.35 + Math.random() * 0.65);
+    parts.push({ x, y, vx:Math.cos(a)*s, vy:Math.sin(a)*s,
+                 life:1, decay:0.55+Math.random()*0.9, sz:2+Math.random()*5, col });
+  }
+}
+function updateParts(dt) {
+  parts.forEach(p => { p.x+=p.vx*dt; p.y+=p.vy*dt; p.life-=p.decay*dt; });
+  parts = parts.filter(p => p.life > 0);
+}
+function drawParts() {
+  parts.forEach(p => {
+    ctx.globalAlpha = p.life;
+    ctx.shadowBlur = 6; ctx.shadowColor = p.col; ctx.fillStyle = p.col;
+    ctx.fillRect(p.x-p.sz/2, p.y-p.sz/2, p.sz, p.sz);
+  });
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+}
+
+// ── game logic ───────────────────────────────────────────────
+function startGame() {
+  OV.style.display = 'none';
+  level = 1; score = 0; gameOn = true;
+  parts = [];
+  loadLevel();
+  if (raf) cancelAnimationFrame(raf);
+  lastTS = performance.now();
+  raf = requestAnimationFrame(loop);
+}
+
+function loadLevel() {
+  const d = getLvl(level);
+  circAngle = 0; circDir = d.dir;
+  circSpd = d.spd * Math.PI * 2;
+  swingT = 0; stuckKnives = []; flyY = null;
+  transitioning = false;
+
+  // place obstacles evenly
+  obstacles = [];
+  for (let i = 0; i < d.obs; i++) {
+    obstacles.push({ rel: wrapAng((i / d.obs) * Math.PI * 2 + Math.PI * 0.3) });
+  }
+  updateHUD();
+}
+
+function tryThrow() {
+  if (!gameOn || transitioning || flyY !== null) return;
+  const d = getLvl(level);
+  if (stuckKnives.length >= d.n) return;
+  flyY = LAUNCH_Y;
+}
+
+function stickKnife() {
+  const worldEntry = Math.PI / 2; // bottom of circle
+  const rel = wrapAng(worldEntry - circAngle);
+
+  // collision vs obstacles
+  for (const o of obstacles) {
+    if (Math.abs(angDiff(rel, o.rel)) < OBS_ANG) { die(); return; }
+  }
+  // collision vs stuck knives
+  for (const k of stuckKnives) {
+    if (Math.abs(angDiff(rel, k.rel)) < MIN_ANG) { die(); return; }
+  }
+
+  // success
+  stuckKnives.push({ rel });
+  score += Math.round(80 + circSpd * 15);
+  const wx = CX + CR * Math.cos(circAngle + rel);
+  const wy = CY + CR * Math.sin(circAngle + rel);
+  burst(wx, wy, '#ff00cc', 14, 130);
+  flyY = null;
+
+  const d = getLvl(level);
+  updateHUD();
+  if (stuckKnives.length >= d.n) levelComplete();
+}
+
+function die() {
+  if (!gameOn) return;
+  flyY = null;
+  shakeT = 0.45; flashAlpha = 1;
+  burst(CX, CY + CR, '#ff3333', 32, 180);
+  burst(CX, CY + CR, '#ff9900', 16, 340);
+  gameOn = false;
+  setTimeout(() => {
+    OV.style.display = 'flex';
+    OV.innerHTML = `
+      <h1 style="color:#ff3333;text-shadow:0 0 24px #ff3333">SYSTEM FAILURE</h1>
+      <div class="sub">BLADE COLLISION DETECTED</div>
+      <div class="sub" style="font-size:17px;margin:14px 0;color:#ff00cc">FINAL SCORE: ${score}</div>
+      <div class="sub">REACHED LEVEL ${level}</div>
+      <button class="btn" onclick="startGame()">RESTART</button>`;
+  }, 900);
+}
+
+function levelComplete() {
+  transitioning = true; transT = 1.6;
+  score += 500 * level;
+  for (let i = 0; i < 6; i++)
+    setTimeout(() => {
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.random() * CR;
+      burst(CX + Math.cos(a)*r, CY + Math.sin(a)*r, '#00e5ff', 20, 200);
+    }, i * 200);
+  updateHUD();
+}
+
+function nextLevel() {
+  level++;
+  loadLevel();
+}
+
+function updateHUD() {
+  const d = getLvl(level);
+  document.getElementById('hLv').textContent = level;
+  document.getElementById('hKn').textContent = `${stuckKnives.length} / ${d.n}`;
+  document.getElementById('hSc').textContent = score;
+}
+
+// ── drawing ──────────────────────────────────────────────────
+function drawBg() {
+  ctx.fillStyle = '#06061a'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(0,229,255,0.055)';
+  for (let x = 55; x < W; x += 55)
+    for (let y = 55; y < H; y += 55)
+      ctx.fillRect(x-1, y-1, 2, 2);
+
+  // subtle throw-line guide
+  ctx.strokeStyle = 'rgba(0,229,255,0.07)';
+  ctx.lineWidth = 1; ctx.setLineDash([5,7]);
+  ctx.beginPath(); ctx.moveTo(CX, CY + CR + 4); ctx.lineTo(CX, LAUNCH_Y - 22); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawCircle() {
+  const t = Date.now() / 1000;
+
+  // outer glow pulse
+  const pulse = 0.5 + 0.5 * Math.sin(t * 2.5);
+  ctx.shadowBlur = 18 + pulse * 14;
+  ctx.shadowColor = '#00e5ff';
+  ctx.strokeStyle = '#00e5ff';
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(CX, CY, CR, 0, Math.PI * 2); ctx.stroke();
+
+  // dark fill
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#07071e';
+  ctx.beginPath(); ctx.arc(CX, CY, CR - 2, 0, Math.PI * 2); ctx.fill();
+
+  // inner ring
+  ctx.strokeStyle = 'rgba(0,229,255,0.18)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(CX, CY, CR * 0.72, 0, Math.PI * 2); ctx.stroke();
+
+  // center count
+  const d = getLvl(level);
+  ctx.shadowBlur = 14; ctx.shadowColor = '#00e5ff';
+  ctx.fillStyle = '#00e5ff';
+  ctx.font = 'bold 26px Courier New';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(`${stuckKnives.length}/${d.n}`, CX, CY);
+
+  // level label small
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = 'rgba(0,229,255,0.45)';
+  ctx.font = '10px Courier New';
+  ctx.fillText(`LV ${level}`, CX, CY + 22);
+  ctx.shadowBlur = 0;
+
+  // spin direction arrow arc
+  const arrowR = CR + 22;
+  ctx.strokeStyle = 'rgba(0,229,255,0.22)';
+  ctx.lineWidth = 2;
+  const arcStart = circAngle, arcEnd = circAngle + circDir * 0.7;
+  ctx.beginPath(); ctx.arc(CX, CY, arrowR, arcStart, arcEnd, circDir < 0); ctx.stroke();
+}
+
+function drawKnifeAt(worldAngle, col, handleCol, alpha = 1) {
+  const btx = CX + (CR + BLADE)  * Math.cos(worldAngle);
+  const bty = CY + (CR + BLADE)  * Math.sin(worldAngle);
+  const mx  = CX + CR            * Math.cos(worldAngle);
+  const my  = CY + CR            * Math.sin(worldAngle);
+  const htx = CX + (CR - HANDLE) * Math.cos(worldAngle);
+  const hty = CY + (CR - HANDLE) * Math.sin(worldAngle);
+
+  ctx.globalAlpha = alpha;
+  ctx.lineCap = 'round';
+
+  // blade glow
+  ctx.shadowBlur = 16; ctx.shadowColor = col;
+  ctx.strokeStyle = col; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(btx, bty); ctx.stroke();
+
+  // blade tip
+  ctx.fillStyle = '#ffffff'; ctx.shadowBlur = 10; ctx.shadowColor = '#ffffff';
+  ctx.beginPath(); ctx.arc(btx, bty, 2.8, 0, Math.PI * 2); ctx.fill();
+
+  // handle
+  ctx.strokeStyle = handleCol; ctx.lineWidth = 5; ctx.shadowColor = handleCol; ctx.shadowBlur = 10;
+  ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(htx, hty); ctx.stroke();
+
+  ctx.shadowBlur = 0; ctx.lineCap = 'butt'; ctx.globalAlpha = 1;
+}
+
+function drawObstacle(relAngle) {
+  const wA = circAngle + relAngle;
+  const ox = CX + CR * Math.cos(wA);
+  const oy = CY + CR * Math.sin(wA);
+  ctx.save();
+  ctx.translate(ox, oy); ctx.rotate(wA);
+  ctx.shadowBlur = 18; ctx.shadowColor = '#ff9900';
+  ctx.fillStyle = '#ff9900';
+  ctx.fillRect(-10, -24, 20, 48);
+  ctx.fillStyle = '#ffcc44';
+  ctx.fillRect(-5, -12, 10, 24);
+  ctx.fillStyle = '#ffff88';
+  ctx.fillRect(-2, -5, 4, 10);
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawFlyingKnife() {
+  const x = CX, y = flyY;
+  ctx.lineCap = 'round';
+
+  // motion glow trail
+  ctx.strokeStyle = 'rgba(255,0,204,0.22)'; ctx.lineWidth = 9;
+  ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.moveTo(x, y + HANDLE + 8); ctx.lineTo(x, y - BLADE - 8); ctx.stroke();
+
+  // blade
+  ctx.shadowBlur = 16; ctx.shadowColor = '#ff00cc';
+  ctx.strokeStyle = '#ff00cc'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y - BLADE); ctx.stroke();
+
+  // tip
+  ctx.fillStyle = '#ffffff'; ctx.shadowBlur = 12; ctx.shadowColor = '#ffffff';
+  ctx.beginPath(); ctx.arc(x, y - BLADE - 2, 3, 0, Math.PI * 2); ctx.fill();
+
+  // handle
+  ctx.strokeStyle = '#ffaa00'; ctx.lineWidth = 5; ctx.shadowBlur = 10; ctx.shadowColor = '#ffaa00';
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + HANDLE); ctx.stroke();
+
+  // handle butt cap
+  ctx.fillStyle = '#ffcc44';
+  ctx.beginPath(); ctx.arc(x, y + HANDLE, 3.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.shadowBlur = 0; ctx.lineCap = 'butt';
+}
+
+function drawReadyKnife() {
+  if (!gameOn || transitioning) return;
+  const x = CX, y = LAUNCH_Y;
+  ctx.lineCap = 'round';
+
+  // subtle idle glow
+  const pulse = 0.6 + 0.4 * Math.sin(Date.now() / 280);
+  ctx.shadowBlur = 12 * pulse; ctx.shadowColor = '#ff00cc';
+  ctx.strokeStyle = '#ff00cc'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y - BLADE); ctx.stroke();
+
+  ctx.fillStyle = '#ffffff'; ctx.shadowBlur = 8; ctx.shadowColor = '#ffffff';
+  ctx.beginPath(); ctx.arc(x, y - BLADE - 2, 2.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.strokeStyle = '#ffaa00'; ctx.lineWidth = 5; ctx.shadowBlur = 10; ctx.shadowColor = '#ffaa00';
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + HANDLE); ctx.stroke();
+
+  ctx.fillStyle = '#ffcc44';
+  ctx.beginPath(); ctx.arc(x, y + HANDLE, 3.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.shadowBlur = 0; ctx.lineCap = 'butt';
+
+  // THROW prompt
+  ctx.fillStyle = `rgba(0,229,255,${0.3 + 0.2 * Math.sin(Date.now()/400)})`;
+  ctx.font = '11px Courier New'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText('[ SPACE / CLICK ]', CX, LAUNCH_Y + HANDLE + 14);
+}
+
+function drawTransitionMsg() {
+  const a = Math.min(1, transT * 2, (transT) * 1.5);
+  ctx.globalAlpha = Math.max(0, a);
+  ctx.shadowBlur = 20; ctx.shadowColor = '#00e5ff';
+  ctx.fillStyle = '#00e5ff';
+  ctx.font = 'bold 30px Courier New';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(`LEVEL ${level} CLEAR`, CX, H / 2 + 80);
+  ctx.font = '13px Courier New';
+  ctx.fillStyle = 'rgba(0,229,255,0.6)';
+  ctx.fillText(`NEXT: LEVEL ${level + 1}`, CX, H / 2 + 120);
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+}
+
+// ── loop ─────────────────────────────────────────────────────
+function loop(ts) {
+  const dt = Math.min((ts - lastTS) / 1000, 0.05);
+  lastTS = ts;
+
+  // ── update ────────────────────────────────────────────────
+  const d = getLvl(level);
+
+  if (gameOn || transitioning) {
+    // circle spin
+    if (d.swing) { swingT += dt; circDir = Math.sin(swingT * 0.85) >= 0 ? 1 : -1; }
+    circAngle += circDir * circSpd * dt;
+
+    // flying knife
+    if (flyY !== null) {
+      flyY -= FLY_SPEED * dt;
+      if (flyY <= CY + CR) stickKnife();
+    }
+
+    // transition
+    if (transitioning) {
+      transT -= dt;
+      if (transT <= 0) nextLevel();
+    }
+
+    // screen shake
+    if (shakeT > 0) {
+      shakeT -= dt;
+      shakeX = (Math.random() - 0.5) * 14;
+      shakeY = (Math.random() - 0.5) * 14;
+    } else { shakeX = 0; shakeY = 0; }
+
+    flashAlpha = Math.max(0, flashAlpha - dt * 4);
+    updateParts(dt);
+  }
+
+  // ── render ────────────────────────────────────────────────
+  drawBg();
+
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  drawCircle();
+  obstacles.forEach(o => drawObstacle(o.rel));
+  stuckKnives.forEach(k => drawKnifeAt(circAngle + k.rel, '#ff00cc', '#ffaa00'));
+  if (flyY !== null) drawFlyingKnife();
+  else drawReadyKnife();
+  drawParts();
+  if (transitioning) drawTransitionMsg();
+
+  ctx.restore();
+
+  // death flash overlay
+  if (flashAlpha > 0) {
+    ctx.globalAlpha = flashAlpha * 0.35;
+    ctx.fillStyle = '#ff3333';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+
+  raf = requestAnimationFrame(loop);
+}
+
+// ── input ────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); tryThrow(); }
+});
+cv.addEventListener('click', () => tryThrow());
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

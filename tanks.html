@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neon Tanks</title>
+<style>
+  :root{--cyan:#00ffe1;--pink:#ff2bd6;--yellow:#ffe600;--lime:#7fff00;--bg:#05050f}
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg);font-family:'Courier New',monospace;color:var(--cyan);overflow:hidden}
+  #wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:7px}
+
+  #hud{display:flex;gap:8px;width:100%;max-width:900px;padding:0 4px}
+  .hudp{flex:1;padding:5px 10px;border:1px solid currentColor;background:rgba(0,0,0,0.5);
+        display:flex;align-items:center;gap:6px;font-size:12px;letter-spacing:1px}
+  .hudp b{font-size:13px;min-width:22px}
+  .hp-wrap{display:flex;gap:2px}
+  .hpdot{font-size:13px;transition:opacity .15s}
+  .bufs{flex:1;text-align:right;font-size:13px;min-width:32px;letter-spacing:0}
+  .dead-x{font-size:10px;opacity:.4}
+
+  #gameCanvas{border:2px solid var(--cyan);box-shadow:0 0 28px rgba(0,255,225,.2);display:block}
+
+  #hint{font-size:11px;color:#4a5878;letter-spacing:1px;text-align:center;line-height:1.7}
+  #hint b{color:var(--cyan)}
+
+  #overlay{position:absolute;top:0;left:0;width:100%;height:100%;
+           display:flex;align-items:center;justify-content:center;
+           flex-direction:column;text-align:center;background:rgba(5,5,15,.88)}
+  #overlay.hidden{display:none}
+  #overlay h1{font-size:clamp(22px,5vw,46px);letter-spacing:8px;margin-bottom:10px;
+              color:var(--cyan);text-shadow:0 0 20px rgba(0,255,225,.55)}
+  #overlay p{color:#9aa6c4;font-size:14px;line-height:1.8;max-width:520px}
+  #overlay p b{color:var(--pink)}
+  #overlayBtn{margin-top:22px;padding:12px 36px;background:transparent;border:2px solid var(--pink);
+              color:var(--pink);font-family:inherit;font-size:16px;letter-spacing:4px;cursor:pointer;
+              text-shadow:0 0 8px rgba(255,43,214,.5);transition:background .15s,color .15s}
+  #overlayBtn:hover{background:var(--pink);color:var(--bg)}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div class="hudp" id="hp1" style="color:#00ffe1;border-color:#00ffe1">
+      <b>P1</b><div class="hp-wrap"><span class="hpdot" id="h1a">■</span><span class="hpdot" id="h1b">■</span><span class="hpdot" id="h1c">■</span></div><span class="bufs" id="b1"></span>
+    </div>
+    <div class="hudp" id="hp2" style="color:#ff2bd6;border-color:#ff2bd6">
+      <b>P2</b><div class="hp-wrap"><span class="hpdot" id="h2a">■</span><span class="hpdot" id="h2b">■</span><span class="hpdot" id="h2c">■</span></div><span class="bufs" id="b2"></span>
+    </div>
+    <div class="hudp" id="hp3" style="color:#ffe600;border-color:#ffe600">
+      <b>P3</b><div class="hp-wrap"><span class="hpdot" id="h3a">■</span><span class="hpdot" id="h3b">■</span><span class="hpdot" id="h3c">■</span></div><span class="bufs" id="b3"></span>
+    </div>
+    <div class="hudp" id="hp4" style="color:#7fff00;border-color:#7fff00">
+      <b>P4</b><div class="hp-wrap"><span class="hpdot" id="h4a">■</span><span class="hpdot" id="h4b">■</span><span class="hpdot" id="h4c">■</span></div><span class="bufs" id="b4"></span>
+    </div>
+  </div>
+
+  <div style="position:relative">
+    <canvas id="gameCanvas" width="900" height="580"></canvas>
+    <div id="overlay">
+      <h1 id="ovTitle">NEON TANKS</h1>
+      <p id="ovMsg">4 players · last tank standing wins<br><br>
+        <b>P1</b> ↑↓←→ + Enter &nbsp;·&nbsp; <b>P2</b> WASD + Q<br>
+        <b>P3</b> IJKL + U &nbsp;·&nbsp; <b>P4</b> G↑ B↓ V← N→ + H<br><br>
+        Collect buffs: <b>⚡</b>speed &nbsp;<b>◈</b>shield &nbsp;<b>+</b>health &nbsp;<b>★</b>rapid fire
+      </p>
+      <button id="overlayBtn">START</button>
+    </div>
+  </div>
+
+  <div id="hint">
+    <b>P1</b> Arrows+Enter &nbsp;·&nbsp; <b>P2</b> WASD+Q &nbsp;·&nbsp;
+    <b>P3</b> IJKL+U &nbsp;·&nbsp; <b>P4</b> G/B fwd/bk · V/N turn · H fire
+  </div>
+</div>
+
+<script>
+/* ================================================================
+   NEON TANKS — 4-player local multiplayer, pure canvas
+   ================================================================ */
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height; // 900 x 580
+
+// ── constants ─────────────────────────────────────────────
+const TR   = 17;    // tank radius
+const TSPD = 2.6;   // tank speed px/frame
+const TTRN = 0.044; // tank turn rad/frame
+const BR   = 5;     // bullet radius
+const BSPD = 7.2;   // bullet speed
+const BLIF = 230;   // bullet max frames
+const BBNC = 3;     // max wall bounces
+const FIRE_CD   = 480; // ms cooldown
+const FIRE_RCD  = 145; // rapid fire cooldown
+const SPD_DUR   = 5000;
+const RAP_DUR   = 5000;
+const BUFF_INT  = 7500; // ms between buff spawns
+const BUFF_LIFE = 13000;
+const MAX_BUFFS = 5;
+const MAX_HP    = 3;
+const MAX_PARTS = 250;
+
+const COLS  = ['#00ffe1','#ff2bd6','#ffe600','#7fff00'];
+const HUDS  = [['h1a','h1b','h1c','b1','hp1'],['h2a','h2b','h2c','b2','hp2'],
+               ['h3a','h3b','h3c','b3','hp3'],['h4a','h4b','h4c','b4','hp4']];
+
+// ── map ───────────────────────────────────────────────────
+const WALLS = [
+  {x:308,y:258,w:284,h:56},   // center horizontal
+  {x:420,y:152,w:60, h:272},  // center vertical
+  {x:118,y:118,w:120,h:46},   // TL cover
+  {x:662,y:118,w:120,h:46},   // TR cover
+  {x:118,y:416,w:120,h:46},   // BL cover
+  {x:662,y:416,w:120,h:46},   // BR cover
+  {x:142,y:244,w:48, h:92},   // left mid barrier
+  {x:710,y:244,w:48, h:92},   // right mid barrier
+];
+
+// ── controls ──────────────────────────────────────────────
+// P4: G=fwd, B=bk (directly below G on keyboard), V=left, N=right, H=fire
+const CTRL = [
+  {fwd:'ArrowUp',  bk:'ArrowDown',  lt:'ArrowLeft', rt:'ArrowRight', fire:'Enter'},
+  {fwd:'w',        bk:'s',          lt:'a',          rt:'d',          fire:'q'},
+  {fwd:'i',        bk:'k',          lt:'j',          rt:'l',          fire:'u'},
+  {fwd:'g',        bk:'b',          lt:'v',          rt:'n',          fire:'h'},
+];
+
+const SPAWNS = [
+  {x:62,  y:62,  a: Math.PI*0.25 },
+  {x:838, y:62,  a: Math.PI*0.75 },
+  {x:62,  y:518, a:-Math.PI*0.25 },
+  {x:838, y:518, a:-Math.PI*0.75 },
+];
+
+// ── buff definitions ──────────────────────────────────────
+const BDEFS = [
+  {type:'speed',  col:'#ffe600', lbl:'⚡'},
+  {type:'shield', col:'#4499ff', lbl:'◈'},
+  {type:'health', col:'#00ff88', lbl:'+'},
+  {type:'rapid',  col:'#ff8800', lbl:'★'},
+];
+
+// ── global state ──────────────────────────────────────────
+let tanks=[], bullets=[], buffs=[], parts=[];
+let keys={}, gs='start', winner=null, nowMs=0, buffTimer=0;
+
+// ── input ─────────────────────────────────────────────────
+const NODEF = new Set(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter',
+                       'w','a','s','d','q','i','j','k','l','u','g','v','b','n','h',' ']);
+window.addEventListener('keydown', e=>{
+  const k = e.key.length===1 ? e.key.toLowerCase() : e.key;
+  keys[k]=true; if(NODEF.has(k)) e.preventDefault();
+});
+window.addEventListener('keyup', e=>{
+  keys[e.key.length===1 ? e.key.toLowerCase() : e.key]=false;
+});
+
+// ── utils ─────────────────────────────────────────────────
+function cRect(cx,cy,r,w){ // circle vs AABB
+  const nx=Math.max(w.x,Math.min(cx,w.x+w.w));
+  const ny=Math.max(w.y,Math.min(cy,w.y+w.h));
+  return (cx-nx)**2+(cy-ny)**2 < r*r;
+}
+function hr(hex,a){
+  return `rgba(${parseInt(hex.slice(1,3),16)},${parseInt(hex.slice(3,5),16)},${parseInt(hex.slice(5,7),16)},${a})`;
+}
+function rr(x,y,w,h,r){ // rounded rect path
+  ctx.beginPath(); ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);     ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+function addParts(x,y,col,n,spd,life){
+  for(let i=0;i<n;i++){
+    if(parts.length>=MAX_PARTS) parts.shift();
+    const a=Math.random()*Math.PI*2, v=spd*(0.4+Math.random()*0.6);
+    parts.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,life,ml:life,col,sz:2+Math.random()*3});
+  }
+}
+
+// ── Tank class ────────────────────────────────────────────
+class Tank {
+  constructor(i){
+    this.i=i; this.col=COLS[i]; this.ctrl=CTRL[i]; this.reset();
+  }
+  reset(){
+    const s=SPAWNS[this.i];
+    this.x=s.x; this.y=s.y; this.a=s.a;
+    this.hp=MAX_HP; this.alive=true; this.shield=false;
+    this.speedEnd=0; this.rapidEnd=0; this.lastFire=0; this.flash=0;
+  }
+  get cd(){ return nowMs<this.rapidEnd ? FIRE_RCD : FIRE_CD; }
+  get sm(){ return nowMs<this.speedEnd ? 1.85 : 1; }
+  hasSpeed(){ return nowMs<this.speedEnd; }
+  hasRapid(){ return nowMs<this.rapidEnd; }
+
+  blocked(x,y){
+    if(x<TR||x>W-TR||y<TR||y>H-TR) return true;
+    for(const w of WALLS) if(cRect(x,y,TR,w)) return true;
+    for(const t of tanks){
+      if(t===this||!t.alive) continue;
+      if(Math.hypot(x-t.x,y-t.y)<TR*2-2) return true;
+    }
+    return false;
+  }
+
+  update(dt){
+    if(!this.alive) return;
+    this.flash=Math.max(0,this.flash-dt);
+    const spd=TSPD*this.sm;
+    if(keys[this.ctrl.lt]) this.a-=TTRN;
+    if(keys[this.ctrl.rt]) this.a+=TTRN;
+    let dx=0,dy=0;
+    if(keys[this.ctrl.fwd]){dx= Math.cos(this.a)*spd; dy= Math.sin(this.a)*spd;}
+    if(keys[this.ctrl.bk]) {dx=-Math.cos(this.a)*spd; dy=-Math.sin(this.a)*spd;}
+    if(dx||dy){
+      const nx=Math.max(TR,Math.min(W-TR,this.x+dx));
+      const ny=Math.max(TR,Math.min(H-TR,this.y+dy));
+      if(!this.blocked(nx,this.y)) this.x=nx;
+      if(!this.blocked(this.x,ny)) this.y=ny;
+    }
+    if(keys[this.ctrl.fire]&&nowMs-this.lastFire>this.cd){
+      this.fire(); this.lastFire=nowMs;
+    }
+    // Buff pickup
+    for(let i=buffs.length-1;i>=0;i--){
+      const bf=buffs[i];
+      if(Math.hypot(this.x-bf.x,this.y-bf.y)<TR+18){ this.applyBuff(bf); buffs.splice(i,1); }
+    }
+  }
+
+  fire(){
+    const d=TR+BR+4;
+    bullets.push({
+      x:this.x+Math.cos(this.a)*d, y:this.y+Math.sin(this.a)*d,
+      vx:Math.cos(this.a)*BSPD,   vy:Math.sin(this.a)*BSPD,
+      owner:this.i, col:this.col, trail:[], bounces:0, life:BLIF
+    });
+    addParts(this.x+Math.cos(this.a)*(TR+4), this.y+Math.sin(this.a)*(TR+4), this.col, 5, 4, 10);
+  }
+
+  applyBuff(bf){
+    addParts(bf.x,bf.y,bf.col,18,5,28);
+    if(bf.type==='speed')  this.speedEnd=nowMs+SPD_DUR;
+    if(bf.type==='shield') this.shield=true;
+    if(bf.type==='health') this.hp=Math.min(MAX_HP,this.hp+1);
+    if(bf.type==='rapid')  this.rapidEnd=nowMs+RAP_DUR;
+    hudRefresh(this.i);
+  }
+
+  hit(){
+    if(this.shield){ this.shield=false; addParts(this.x,this.y,'#4499ff',20,5,26); hudRefresh(this.i); return; }
+    this.hp--; this.flash=240;
+    addParts(this.x,this.y,this.col,12,5,22);
+    if(this.hp<=0){ this.alive=false; addParts(this.x,this.y,this.col,36,9,55); }
+    hudRefresh(this.i);
+  }
+
+  draw(){
+    if(!this.alive) return;
+    ctx.save(); ctx.translate(this.x,this.y); ctx.rotate(this.a);
+    const fc = this.flash>0;
+    const dc = fc ? '#ffffff' : this.col;
+    ctx.shadowColor=this.col; ctx.shadowBlur=14;
+    // Body
+    ctx.fillStyle = fc ? `rgba(255,255,255,${0.3+this.flash/240*0.7})` : hr(this.col,0.88);
+    rr(-TR,-TR*0.72,TR*2,TR*1.44,4); ctx.fill();
+    ctx.strokeStyle=dc; ctx.lineWidth=2; ctx.stroke();
+    // Treads
+    ctx.shadowBlur=0; ctx.strokeStyle=hr(this.col,0.28); ctx.lineWidth=1;
+    for(const s of[-1,1]){ ctx.beginPath(); ctx.moveTo(-TR,s*TR*0.52); ctx.lineTo(TR,s*TR*0.52); ctx.stroke(); }
+    // Turret
+    ctx.fillStyle='#09091e'; rr(-TR*.48,-TR*.48,TR*.96,TR*.96,4); ctx.fill();
+    ctx.strokeStyle=dc; ctx.lineWidth=1.5; ctx.shadowColor=this.col; ctx.shadowBlur=6; ctx.stroke();
+    // Barrel
+    ctx.fillStyle=dc; ctx.shadowBlur=8;
+    ctx.fillRect(TR*0.18,-3.5,TR+5,7);
+    ctx.restore();
+    // Shield ring
+    if(this.shield){
+      ctx.save();
+      ctx.strokeStyle='#4499ff'; ctx.shadowColor='#4499ff'; ctx.shadowBlur=16;
+      ctx.lineWidth=2; ctx.globalAlpha=0.5+0.35*Math.sin(nowMs*0.006);
+      ctx.beginPath(); ctx.arc(this.x,this.y,TR+9,0,Math.PI*2); ctx.stroke();
+      ctx.restore();
+    }
+    // Speed sparks
+    if(this.hasSpeed()) addParts(this.x-Math.cos(this.a)*TR, this.y-Math.sin(this.a)*TR, this.col, 1, 1.2, 8);
+    // Label
+    ctx.save(); ctx.font='bold 10px Courier New'; ctx.textAlign='center';
+    ctx.fillStyle=this.col; ctx.shadowColor=this.col; ctx.shadowBlur=6;
+    ctx.fillText(`P${this.i+1}`, this.x, this.y-TR-5); ctx.restore();
+  }
+}
+
+// ── bullets ───────────────────────────────────────────────
+function updateBullets(){
+  outer:
+  for(let i=bullets.length-1;i>=0;i--){
+    const b=bullets[i];
+    if(--b.life<=0){ bullets.splice(i,1); continue; }
+    b.trail.unshift({x:b.x,y:b.y});
+    if(b.trail.length>8) b.trail.pop();
+    let nx=b.x+b.vx, ny=b.y+b.vy, hit=false;
+    // Canvas wall bounce
+    if(nx<BR||nx>W-BR){ b.vx*=-1; nx=b.x+b.vx; hit=true; }
+    if(ny<BR||ny>H-BR){ b.vy*=-1; ny=b.y+b.vy; hit=true; }
+    // Obstacle bounce
+    for(const w of WALLS){
+      const hx=cRect(nx,b.y,BR,w), hy=cRect(b.x,ny,BR,w), hb=cRect(nx,ny,BR,w);
+      if(!hx&&!hy&&!hb) continue;
+      if(hx) b.vx*=-1; if(hy) b.vy*=-1;
+      if(!hx&&!hy&&hb){ b.vx*=-1; b.vy*=-1; }
+      nx=b.x+b.vx; ny=b.y+b.vy; hit=true; break;
+    }
+    if(hit){
+      if(++b.bounces>BBNC){ bullets.splice(i,1); continue; }
+      addParts(b.x,b.y,b.col,3,2,8);
+    }
+    b.x=nx; b.y=ny;
+    for(const t of tanks){
+      if(!t.alive) continue;
+      if(t.i===b.owner&&b.bounces===0) continue; // no self-hit before first bounce
+      if(Math.hypot(b.x-t.x,b.y-t.y)<TR+BR-2){
+        t.hit(); addParts(b.x,b.y,b.col,10,4,18); bullets.splice(i,1); continue outer;
+      }
+    }
+  }
+}
+
+// ── buffs ─────────────────────────────────────────────────
+function spawnBuff(){
+  if(buffs.length>=MAX_BUFFS) return;
+  for(let att=0;att<50;att++){
+    const x=80+Math.random()*(W-160), y=80+Math.random()*(H-160);
+    let ok=true;
+    for(const w of WALLS) if(x>w.x-40&&x<w.x+w.w+40&&y>w.y-40&&y<w.y+w.h+40){ok=false;break;}
+    if(ok){
+      const d=BDEFS[Math.floor(Math.random()*BDEFS.length)];
+      buffs.push({x,y,type:d.type,col:d.col,lbl:d.lbl,pulse:Math.random()*Math.PI*2,born:nowMs});
+      return;
+    }
+  }
+}
+
+// ── HUD ───────────────────────────────────────────────────
+function hudRefresh(i){
+  if(!tanks[i]) return;
+  const t=tanks[i];
+  const ids=['a','b','c'];
+  ids.forEach((s,j)=>{
+    const el=document.getElementById(`h${i+1}${s}`);
+    if(!el) return;
+    el.textContent=j<t.hp?'■':'◻';
+    el.style.opacity=j<t.hp?'1':'0.2';
+  });
+  const bi=document.getElementById(`b${i+1}`);
+  if(bi){
+    let s='';
+    if(t.shield)     s+='◈';
+    if(t.hasSpeed()) s+='⚡';
+    if(t.hasRapid()) s+='★';
+    bi.textContent=s;
+  }
+  const panel=document.getElementById(`hp${i+1}`);
+  if(panel) panel.style.opacity=t.alive?'1':'0.35';
+}
+function hudAll(){ for(let i=0;i<4;i++) hudRefresh(i); }
+
+// ── init ──────────────────────────────────────────────────
+function initGame(){
+  tanks=[0,1,2,3].map(i=>new Tank(i));
+  bullets=[]; buffs=[]; parts=[];
+  buffTimer=0; winner=null; gs='playing';
+  hudAll();
+  spawnBuff(); spawnBuff(); // start with 2 buffs
+}
+
+// ── win check ─────────────────────────────────────────────
+function checkWin(){
+  const alive=tanks.filter(t=>t.alive);
+  if(alive.length===1){ winner=alive[0]; gs='over'; setTimeout(showEnd,900); }
+  else if(alive.length===0){ gs='over'; setTimeout(showEnd,900); }
+}
+
+// ── update ────────────────────────────────────────────────
+function update(dt){
+  if(gs==='start') return;
+  if(gs!=='playing'){ updateParts(); return; }
+  nowMs=performance.now();
+  for(const t of tanks) t.update(dt);
+  updateBullets();
+  buffTimer+=dt;
+  if(buffTimer>BUFF_INT){ spawnBuff(); buffTimer=0; }
+  for(let i=buffs.length-1;i>=0;i--){
+    buffs[i].pulse+=0.055;
+    if(nowMs-buffs[i].born>BUFF_LIFE) buffs.splice(i,1);
+  }
+  updateParts();
+  checkWin();
+  hudAll();
+}
+function updateParts(){
+  for(let i=parts.length-1;i>=0;i--){
+    const p=parts[i]; p.x+=p.vx; p.y+=p.vy; p.vy+=0.13; p.life--;
+    if(p.life<=0) parts.splice(i,1);
+  }
+}
+
+// ── render ────────────────────────────────────────────────
+function render(){
+  // Background
+  ctx.fillStyle='#05050f'; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle='rgba(0,255,225,.05)'; ctx.lineWidth=1;
+  for(let x=0;x<=W;x+=48){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for(let y=0;y<=H;y+=48){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  // Canvas border
+  ctx.save(); ctx.strokeStyle='#00ffe1'; ctx.lineWidth=2;
+  ctx.shadowColor='#00ffe1'; ctx.shadowBlur=12;
+  ctx.strokeRect(1,1,W-2,H-2); ctx.restore();
+
+  // Spawn corner markers
+  for(let i=0;i<4;i++){
+    const s=SPAWNS[i]; const t=tanks[i];
+    ctx.save(); ctx.strokeStyle=hr(COLS[i],0.15); ctx.lineWidth=1;
+    ctx.setLineDash([4,6]);
+    ctx.beginPath(); ctx.arc(s.x,s.y,26,0,Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]); ctx.restore();
+  }
+
+  // Walls
+  ctx.save(); ctx.shadowColor='#00ffe1'; ctx.shadowBlur=8;
+  for(const w of WALLS){
+    ctx.fillStyle='#0d0d26'; ctx.fillRect(w.x,w.y,w.w,w.h);
+    ctx.strokeStyle='#00ffe1'; ctx.lineWidth=2; ctx.strokeRect(w.x,w.y,w.w,w.h);
+    ctx.strokeStyle='rgba(0,255,225,.1)'; ctx.lineWidth=1;
+    ctx.beginPath();
+    ctx.moveTo(w.x+w.w/2,w.y); ctx.lineTo(w.x+w.w/2,w.y+w.h);
+    ctx.moveTo(w.x,w.y+w.h/2); ctx.lineTo(w.x+w.w,w.y+w.h/2);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Buffs
+  for(const b of buffs){
+    const p=0.85+0.15*Math.sin(b.pulse);
+    ctx.save(); ctx.shadowColor=b.col; ctx.shadowBlur=14*p;
+    ctx.strokeStyle=b.col; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(b.x,b.y,13*p,0,Math.PI*2); ctx.stroke();
+    ctx.fillStyle=hr(b.col,.18);
+    ctx.beginPath(); ctx.arc(b.x,b.y,13*p,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=b.col; ctx.font='bold 13px Courier New';
+    ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.shadowBlur=6;
+    ctx.fillText(b.lbl,b.x,b.y); ctx.restore();
+  }
+  ctx.textBaseline='alphabetic'; ctx.textAlign='left';
+
+  // Bullets + trails
+  for(const b of bullets){
+    for(let i=b.trail.length-1;i>=0;i--){
+      const t=b.trail[i];
+      ctx.globalAlpha=(1-i/b.trail.length)*.45;
+      ctx.fillStyle=b.col;
+      ctx.beginPath(); ctx.arc(t.x,t.y,BR*(1-i/b.trail.length*.5),0,Math.PI*2); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+    ctx.save(); ctx.shadowColor=b.col; ctx.shadowBlur=10;
+    ctx.fillStyle=b.col;
+    ctx.beginPath(); ctx.arc(b.x,b.y,BR,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.globalAlpha=1;
+
+  // Tanks
+  for(const t of tanks) t.draw();
+
+  // Dead markers
+  for(const t of tanks){
+    if(t.alive) continue;
+    ctx.save(); ctx.font='bold 22px Courier New'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle=hr(t.col,.3); ctx.shadowBlur=0;
+    ctx.fillText('✕',SPAWNS[t.i].x,SPAWNS[t.i].y); ctx.restore();
+  }
+
+  // Particles (flat, fast)
+  for(const p of parts){
+    ctx.globalAlpha=p.life/p.ml;
+    ctx.fillStyle=p.col;
+    ctx.fillRect(p.x-p.sz/2,p.y-p.sz/2,p.sz,p.sz);
+  }
+  ctx.globalAlpha=1;
+}
+
+// ── overlay ───────────────────────────────────────────────
+const overlay=document.getElementById('overlay');
+const ovTitle=document.getElementById('ovTitle');
+const ovMsg=document.getElementById('ovMsg');
+const ovBtn=document.getElementById('overlayBtn');
+
+function showEnd(){
+  if(winner){
+    ovTitle.textContent=`P${winner.i+1} WINS!`;
+    ovTitle.style.color=winner.col;
+    ovTitle.style.textShadow=`0 0 24px ${winner.col}88`;
+    ovMsg.innerHTML=`<b style="color:${winner.col}">P${winner.i+1}</b> is the last tank standing!`;
+  } else {
+    ovTitle.textContent='DRAW!'; ovTitle.style.color='#ffe600';
+    ovMsg.innerHTML='All tanks destroyed simultaneously!';
+  }
+  ovBtn.textContent='PLAY AGAIN';
+  overlay.classList.remove('hidden');
+}
+
+ovBtn.addEventListener('click',()=>{
+  overlay.classList.add('hidden');
+  ovTitle.style.color=''; ovTitle.style.textShadow='';
+  ovTitle.textContent='NEON TANKS';
+  ovMsg.innerHTML=`4 players · last tank standing wins<br><br>
+    <b>P1</b> ↑↓←→ + Enter &nbsp;·&nbsp; <b>P2</b> WASD + Q<br>
+    <b>P3</b> IJKL + U &nbsp;·&nbsp; <b>P4</b> G↑ B↓ V← N→ + H<br><br>
+    Collect buffs: <b>⚡</b>speed &nbsp;<b>◈</b>shield &nbsp;<b>+</b>health &nbsp;<b>★</b>rapid fire`;
+  initGame();
+});
+
+// ── main loop ─────────────────────────────────────────────
+let lastTs=0;
+function loop(ts){
+  nowMs=performance.now();
+  const dt=Math.min(ts-lastTs,50); lastTs=ts;
+  update(dt); render();
+  requestAnimationFrame(loop);
+}
+
+// Start with overlay visible
+nowMs=performance.now();
+initGame(); // build tanks so we can render the map behind overlay
+gs='start';
+overlay.classList.remove('hidden');
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
+HTMLEOF
+echo "Written $(wc -l < /mnt/user-data/outputs/tanks.html) lines"

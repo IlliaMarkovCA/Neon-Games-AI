@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neon Rail Switcher</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: #060614;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  font-family: 'Courier New', monospace;
+  color: #00e5ff;
+  user-select: none;
+  overflow: hidden;
+}
+#hud {
+  display: flex;
+  gap: 44px;
+  padding: 14px 0 8px;
+  font-size: 13px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+}
+.val { color: #ff00cc; }
+canvas {
+  display: block;
+  border: 1px solid rgba(0,229,255,0.45);
+  box-shadow: 0 0 32px rgba(0,229,255,0.18), 0 0 2px rgba(0,229,255,0.9);
+}
+#ctrl {
+  padding: 9px 0 0;
+  font-size: 11px;
+  color: rgba(0,229,255,0.38);
+  letter-spacing: 2px;
+}
+#ctrl b { color: rgba(0,229,255,0.72); font-weight: normal; }
+#overlay {
+  position: fixed; inset: 0;
+  background: rgba(6,6,20,0.94);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+#overlay h1 {
+  font-size: 28px;
+  letter-spacing: 8px;
+  color: #00e5ff;
+  text-shadow: 0 0 22px #00e5ff, 0 0 55px rgba(0,229,255,0.3);
+  margin-bottom: 16px;
+}
+.sub { font-size:11px; letter-spacing:3px; color:rgba(0,229,255,0.48); margin:4px 0; }
+.btn {
+  margin-top: 28px;
+  padding: 12px 50px;
+  border: 1px solid #00e5ff;
+  background: transparent;
+  color: #00e5ff;
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  letter-spacing: 5px;
+  cursor: pointer;
+  text-transform: uppercase;
+  box-shadow: 0 0 14px rgba(0,229,255,0.18);
+  transition: all 0.2s;
+}
+.btn:hover { background: rgba(0,229,255,0.09); box-shadow: 0 0 28px rgba(0,229,255,0.38); }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <span>REACTORS <span class="val" id="hR">0</span> / 3</span>
+  <span>CRASHES <span class="val" id="hC">0</span> / 3</span>
+  <span>TIME <span class="val" id="hT">60</span></span>
+  <span>SCORE <span class="val" id="hS">0</span></span>
+</div>
+
+<canvas id="cv" width="900" height="490"></canvas>
+
+<div id="ctrl">
+  Controls: <b>1 – 6</b> toggle switches &nbsp;·&nbsp; <b>CLICK</b> a switch node to flip it
+</div>
+
+<div id="overlay">
+  <h1>NEON RAIL SWITCHER</h1>
+  <div class="sub">ROUTE ENERGY CARTS TO POWER ALL 3 REACTORS</div>
+  <div class="sub" style="color:rgba(255,0,204,0.48)">3 CRASHES OR TIMEOUT = SYSTEM FAILURE</div>
+  <button class="btn" onclick="startGame()">ENGAGE SYSTEM</button>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────
+//  SETUP
+// ─────────────────────────────────────────────────────────────
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const OV = document.getElementById('overlay');
+
+// ─── node positions ──────────────────────────────────────────
+const POS = {
+  EA:{x:62,y:130}, EB:{x:62,y:258}, EC:{x:62,y:385},
+  S1:{x:265,y:130}, S2:{x:510,y:130},
+  S3:{x:265,y:258}, S4:{x:510,y:258},
+  S5:{x:265,y:385}, S6:{x:510,y:385},
+  RA:{x:760,y:130}, RB:{x:760,y:258}, RC:{x:760,y:385}
+};
+
+// ─── routing: index = switch state ───────────────────────────
+//   S1: right→S2  |  down→S3
+//   S2: right→RA  |  down→S4
+//   S3: right→S4  |  down→S5
+//   S4: right→RB  |  down→S6
+//   S5: right→S6  |  diagonal→RB  (express lane!)
+//   S6: right→RC  |  diagonal→RB
+const ROUTES = {
+  S1:['S2','S3'], S2:['RA','S4'],
+  S3:['S4','S5'], S4:['RB','S6'],
+  S5:['S6','RB'], S6:['RC','RB'],
+};
+
+const FIRST   = { EA:'S1', EB:'S3', EC:'S5' };
+const REACTORS= new Set(['RA','RB','RC']);
+const SW_IDS  = ['S1','S2','S3','S4','S5','S6'];
+
+// all undirected rail segments (drawn at base opacity)
+const ALL_SEGS = [
+  ['EA','S1'],['S1','S2'],['S2','RA'],
+  ['EB','S3'],['S3','S4'],['S4','RB'],
+  ['EC','S5'],['S5','S6'],['S6','RC'],
+  ['S1','S3'],['S2','S4'],
+  ['S3','S5'],['S4','S6'],
+  ['S5','RB'],['S6','RB'],   // express diagonal tracks
+];
+
+// ─────────────────────────────────────────────────────────────
+//  STATE
+// ─────────────────────────────────────────────────────────────
+let sw, rCharged, carts, parts;
+let lives, score, timeLeft, rCount, spawnT, spawnI;
+let swFlash = {};   // flash timer per switch for toggle feedback
+let gameOn = false, raf = null, lastTS = 0;
+
+// ─────────────────────────────────────────────────────────────
+//  CART
+// ─────────────────────────────────────────────────────────────
+class Cart {
+  constructor(entry) {
+    this.from  = entry;
+    this.to    = FIRST[entry];
+    this.t     = 0;
+    this.speed = 0.44;    // edges / sec
+    this.dead  = false;
+    this.done  = false;
+    this.trail = [];
+    this.hue   = 292 + Math.random() * 38;
+  }
+  xy() {
+    const f=POS[this.from], t=POS[this.to];
+    return { x: f.x+(t.x-f.x)*this.t, y: f.y+(t.y-f.y)*this.t };
+  }
+  update(dt) {
+    if (this.dead || this.done) return;
+    const p = this.xy();
+    this.trail.push({x:p.x, y:p.y});
+    if (this.trail.length > 18) this.trail.shift();
+    this.t += this.speed * dt;
+    if (this.t >= 1) {
+      this.t -= 1;
+      this.from = this.to;
+      if (REACTORS.has(this.from)) {
+        this.done = true;
+        chargeReactor(this.from);
+      } else {
+        this.to = ROUTES[this.from][sw[this.from]];
+      }
+    }
+  }
+  draw() {
+    if (this.dead) return;
+    const p = this.xy();
+    const col = `hsl(${this.hue},100%,65%)`;
+    // trail
+    for (let i=0;i<this.trail.length;i++) {
+      const tp=this.trail[i];
+      const a = (i/this.trail.length)*0.4;
+      const sz= 5*(i/this.trail.length);
+      ctx.globalAlpha=a; ctx.fillStyle=col;
+      ctx.fillRect(tp.x-sz/2, tp.y-sz/2, sz, sz);
+    }
+    ctx.globalAlpha=1;
+    // body
+    ctx.shadowBlur=26; ctx.shadowColor=col;
+    ctx.fillStyle=col;
+    ctx.fillRect(p.x-11, p.y-11, 22, 22);
+    ctx.shadowBlur=0;
+    // dark window
+    ctx.fillStyle='#0b0b20';
+    ctx.fillRect(p.x-7, p.y-7, 14, 14);
+    // glowing inner pip
+    ctx.shadowBlur=12; ctx.shadowColor=col;
+    ctx.fillStyle=col;
+    ctx.fillRect(p.x-3, p.y-3, 6, 6);
+    ctx.shadowBlur=0;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  PARTICLES
+// ─────────────────────────────────────────────────────────────
+function burst(x, y, col, n, spd=160) {
+  for (let i=0;i<n;i++) {
+    const a=Math.random()*Math.PI*2;
+    const s=spd*(0.35+Math.random()*0.65);
+    parts.push({ x,y, vx:Math.cos(a)*s, vy:Math.sin(a)*s-35,
+                 life:1, decay:0.55+Math.random()*1.0, sz:2+Math.random()*5, col });
+  }
+}
+
+function updateParts(dt) {
+  parts.forEach(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=110*dt;p.life-=p.decay*dt;});
+  parts=parts.filter(p=>p.life>0);
+}
+
+function drawParts() {
+  parts.forEach(p=>{
+    ctx.globalAlpha=p.life;
+    ctx.shadowBlur=6; ctx.shadowColor=p.col;
+    ctx.fillStyle=p.col;
+    ctx.fillRect(p.x-p.sz/2, p.y-p.sz/2, p.sz, p.sz);
+  });
+  ctx.globalAlpha=1; ctx.shadowBlur=0;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  LOGIC
+// ─────────────────────────────────────────────────────────────
+function startGame() {
+  OV.style.display='none';
+  sw={S1:0,S2:0,S3:0,S4:0,S5:0,S6:0};
+  rCharged={RA:false,RB:false,RC:false};
+  swFlash={S1:0,S2:0,S3:0,S4:0,S5:0,S6:0};
+  carts=[]; parts=[];
+  lives=3; score=0; timeLeft=60; rCount=0;
+  spawnT=2.0; spawnI=4.5;
+  gameOn=true;
+  if (raf) cancelAnimationFrame(raf);
+  lastTS=performance.now();
+  raf=requestAnimationFrame(loop);
+}
+
+function chargeReactor(id) {
+  if (rCharged[id]) return;
+  rCharged[id]=true; rCount++; score+=500;
+  const p=POS[id];
+  burst(p.x,p.y,'#00e5ff',38,210); burst(p.x,p.y,'#ffffff',16,400);
+  updateHUD();
+  if (rCount>=3) endGame('win');
+}
+
+function crashPair(a,b) {
+  if (a.dead||b.dead) return;
+  const p=a.xy();
+  a.dead=b.dead=true;
+  lives--; score=Math.max(0,score-100);
+  burst(p.x,p.y,'#ff3333',28,175); burst(p.x,p.y,'#ff9900',12,330);
+  updateHUD();
+  if (lives<=0) endGame('lose');
+}
+
+function flipSwitch(n) {
+  const id=`S${n}`;
+  if (!(id in sw)) return;
+  sw[id]^=1; swFlash[id]=0.55; score+=5; updateHUD();
+}
+
+function endGame(res) {
+  gameOn=false;
+  const win=res==='win';
+  const cc=win?'#00e5ff':'#ff3333';
+  OV.style.display='flex';
+  OV.innerHTML=`
+    <h1 style="color:${cc};text-shadow:0 0 24px ${cc}">${win?'POWER ONLINE':'SYSTEM FAILURE'}</h1>
+    <div class="sub" style="color:${cc}88">${win?'ALL REACTORS CHARGED — GRID STABLE':'CIRCUIT OVERLOAD — REBOOT REQUIRED'}</div>
+    <div class="sub" style="font-size:17px;margin:14px 0;color:#ff00cc">FINAL SCORE: ${score}</div>
+    <button class="btn" onclick="startGame()">RESTART</button>
+  `;
+}
+
+function updateHUD() {
+  document.getElementById('hR').textContent=rCount;
+  document.getElementById('hC').textContent=3-lives;
+  document.getElementById('hT').textContent=Math.max(0,Math.ceil(timeLeft));
+  document.getElementById('hS').textContent=score;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  DRAWING
+// ─────────────────────────────────────────────────────────────
+function drawBg() {
+  ctx.fillStyle='#06061a'; ctx.fillRect(0,0,W,H);
+  // dot grid
+  ctx.fillStyle='rgba(0,229,255,0.055)';
+  for(let x=55;x<W;x+=55) for(let y=55;y<H;y+=55) ctx.fillRect(x-1,y-1,2,2);
+}
+
+function drawRails() {
+  // all segments dim
+  ALL_SEGS.forEach(([a,b])=>{
+    const pa=POS[a], pb=POS[b];
+    ctx.beginPath(); ctx.moveTo(pa.x,pa.y); ctx.lineTo(pb.x,pb.y);
+    ctx.strokeStyle='rgba(0,229,255,0.1)'; ctx.lineWidth=10; ctx.stroke();
+    ctx.strokeStyle='rgba(0,229,255,0.22)'; ctx.lineWidth=1.5; ctx.stroke();
+  });
+  // highlight active direction for each switch
+  SW_IDS.forEach(id=>{
+    const nxt=ROUTES[id][sw[id]];
+    const pa=POS[id], pb=POS[nxt];
+    ctx.shadowBlur=16; ctx.shadowColor='#00e5ff';
+    ctx.beginPath(); ctx.moveTo(pa.x,pa.y); ctx.lineTo(pb.x,pb.y);
+    ctx.strokeStyle='rgba(0,229,255,0.88)'; ctx.lineWidth=3; ctx.stroke();
+    ctx.shadowBlur=0;
+  });
+  // entry feeds
+  [['EA','S1'],['EB','S3'],['EC','S5']].forEach(([a,b])=>{
+    const pa=POS[a], pb=POS[b];
+    ctx.shadowBlur=7; ctx.shadowColor='#ffaa33';
+    ctx.beginPath(); ctx.moveTo(pa.x,pa.y); ctx.lineTo(pb.x,pb.y);
+    ctx.strokeStyle='rgba(255,170,51,0.72)'; ctx.lineWidth=2; ctx.stroke();
+    ctx.shadowBlur=0;
+  });
+}
+
+function drawSwitch(id) {
+  const p=POS[id], s=sw[id];
+  const flash=swFlash[id]||0;
+  const base=s===0?'#00e5ff':'#ff00cc';
+  // boost color on flash
+  const glow=flash>0.25?'#ffffff':base;
+  const sz=25;
+
+  ctx.shadowBlur=flash>0.25?32:20; ctx.shadowColor=glow;
+  ctx.strokeStyle=glow; ctx.lineWidth=2;
+  ctx.strokeRect(p.x-sz/2, p.y-sz/2, sz, sz);
+  ctx.fillStyle=glow+'22'; ctx.fillRect(p.x-sz/2, p.y-sz/2, sz, sz);
+
+  ctx.fillStyle=glow;
+  ctx.font='bold 14px Courier New';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(id[1], p.x, p.y);
+
+  // direction arrow
+  const to=POS[ROUTES[id][s]];
+  const dx=to.x-p.x, dy=to.y-p.y;
+  const len=Math.hypot(dx,dy);
+  const nx=dx/len, ny=dy/len;
+  const off=sz/2+6, aL=14;
+  const ax=p.x+nx*off, ay=p.y+ny*off;
+  ctx.shadowBlur=8; ctx.shadowColor=glow; ctx.fillStyle=glow;
+  ctx.beginPath();
+  ctx.moveTo(ax+nx*aL, ay+ny*aL);
+  ctx.lineTo(ax+ny*5,  ay-nx*5);
+  ctx.lineTo(ax-ny*5,  ay+nx*5);
+  ctx.closePath(); ctx.fill();
+  ctx.shadowBlur=0;
+}
+
+function drawReactor(id) {
+  const p=POS[id], ch=rCharged[id], sz=34, t=Date.now()/1000;
+  if (ch) {
+    // animated pulse rings
+    for (let i=0;i<3;i++) {
+      const r=((t*0.65+i*0.33)%1)*58+sz/2;
+      const a=1-((t*0.65+i*0.33)%1);
+      ctx.strokeStyle=`rgba(0,229,255,${a*0.48})`; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(p.x,p.y,r,0,Math.PI*2); ctx.stroke();
+    }
+    ctx.shadowBlur=34; ctx.shadowColor='#00e5ff';
+    ctx.fillStyle='#00e5ff'; ctx.fillRect(p.x-sz/2,p.y-sz/2,sz,sz);
+    ctx.shadowBlur=0;
+    ctx.fillStyle='#ffffff'; ctx.fillRect(p.x-sz/4,p.y-sz/4,sz/2,sz/2);
+    ctx.fillStyle='#06061a'; ctx.fillRect(p.x-sz/8,p.y-sz/8,sz/4,sz/4);
+  } else {
+    ctx.shadowBlur=6; ctx.shadowColor='#1e2a44';
+    ctx.strokeStyle='#1e2a44'; ctx.lineWidth=2;
+    ctx.strokeRect(p.x-sz/2,p.y-sz/2,sz,sz);
+    ctx.fillStyle='#0b0b22'; ctx.fillRect(p.x-sz/2,p.y-sz/2,sz,sz);
+    ctx.fillStyle='#2a3a55';
+    ctx.font='20px Courier New'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('⚡',p.x,p.y); ctx.shadowBlur=0;
+  }
+}
+
+function drawEntry(id) {
+  const p=POS[id];
+  ctx.shadowBlur=9; ctx.shadowColor='#ffaa33';
+  ctx.fillStyle='#ffaa33'; ctx.font='13px Courier New';
+  ctx.textAlign='right'; ctx.textBaseline='middle';
+  ctx.fillText(`▶ ${id[1]}`, p.x-10, p.y); ctx.shadowBlur=0;
+}
+
+function drawTimerBar() {
+  const bw=W-44, frac=Math.max(0,timeLeft/60), low=timeLeft<15;
+  ctx.fillStyle='#0e0e28'; ctx.fillRect(22,H-12,bw,5);
+  ctx.shadowBlur=9; ctx.shadowColor=low?'#ff3333':'#00e5ff';
+  ctx.fillStyle=low?'#ff3333':'#00e5ff';
+  ctx.fillRect(22,H-12,bw*frac,5); ctx.shadowBlur=0;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  COLLISION + SPAWN
+// ─────────────────────────────────────────────────────────────
+function checkCrashes() {
+  const live=carts.filter(c=>!c.dead&&!c.done);
+  for(let i=0;i<live.length;i++){
+    const pi=live[i].xy();
+    for(let j=i+1;j<live.length;j++){
+      const pj=live[j].xy();
+      if(Math.hypot(pi.x-pj.x,pi.y-pj.y)<20) crashPair(live[i],live[j]);
+    }
+  }
+}
+
+function spawnCart(dt) {
+  spawnT-=dt;
+  if(spawnT<=0 && carts.filter(c=>!c.dead&&!c.done).length<5) {
+    const en=['EA','EB','EC'];
+    carts.push(new Cart(en[(Math.random()*3)|0]));
+    spawnT=spawnI; spawnI=Math.max(2.8,spawnI-0.07);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  GAME LOOP
+// ─────────────────────────────────────────────────────────────
+function loop(ts) {
+  const dt=Math.min((ts-lastTS)/1000, 0.05);
+  lastTS=ts;
+
+  if (gameOn) {
+    timeLeft-=dt;
+    if (timeLeft<=0&&gameOn){timeLeft=0;endGame('lose');}
+    spawnCart(dt);
+    carts.forEach(c=>c.update(dt));
+    checkCrashes();
+    carts=carts.filter(c=>!c.dead&&!c.done);
+    SW_IDS.forEach(id=>{if(swFlash[id]>0)swFlash[id]-=dt;});
+    updateParts(dt);
+    if((ts|0)%8===0) updateHUD();
+  }
+
+  // ─── render ────────────────────────────────────────────────
+  drawBg();
+  drawRails();
+  drawParts();
+  ['EA','EB','EC'].forEach(drawEntry);
+  SW_IDS.forEach(drawSwitch);
+  ['RA','RB','RC'].forEach(drawReactor);
+  carts.forEach(c=>c.draw());
+  if(gameOn) drawTimerBar();
+
+  raf=requestAnimationFrame(loop);
+}
+
+// ─────────────────────────────────────────────────────────────
+//  INPUT
+// ─────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e=>{
+  if(!gameOn) return;
+  const n=parseInt(e.key);
+  if(n>=1&&n<=6){e.preventDefault();flipSwitch(n);}
+});
+
+cv.addEventListener('click', e=>{
+  if(!gameOn) return;
+  const r=cv.getBoundingClientRect();
+  const mx=(e.clientX-r.left)*(W/r.width);
+  const my=(e.clientY-r.top)*(H/r.height);
+  SW_IDS.forEach(id=>{
+    const p=POS[id];
+    if(Math.abs(mx-p.x)<24&&Math.abs(my-p.y)<24) flipSwitch(parseInt(id[1]));
+  });
+});
+
+// kick off render (shows overlay until user starts)
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

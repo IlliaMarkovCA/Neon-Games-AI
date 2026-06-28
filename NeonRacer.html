@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neon Drift</title>
+<style>
+  :root {
+    --cyan: #00ffe1;
+    --pink: #ff2bd6;
+    --bg: #05050f;
+    --panel: #0c0c1e;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg);
+    font-family: 'Courier New', monospace;
+    color: var(--cyan);
+    overflow: hidden;
+  }
+  #wrap {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    height: 100%;
+    gap: 10px;
+  }
+  #hud {
+    display: flex; gap: 28px; align-items: center;
+    width: 100%; max-width: 900px;
+    padding: 0 10px;
+    letter-spacing: 2px;
+    font-size: 16px;
+    text-shadow: 0 0 8px rgba(0,255,225,0.5);
+  }
+  #hud .stat span { color: #fff; }
+  #speedBarOuter {
+    flex: 1;
+    height: 10px;
+    background: var(--panel);
+    border: 1px solid var(--cyan);
+  }
+  #speedBarInner {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, var(--cyan), var(--pink));
+  }
+
+  #gameCanvas {
+    background: #000;
+    border: 2px solid var(--cyan);
+    box-shadow: 0 0 24px rgba(0,255,225,0.25);
+    max-width: 95vw;
+    max-height: 70vh;
+  }
+
+  #controls {
+    font-size: 13px;
+    color: #7d8bb8;
+    letter-spacing: 1px;
+    text-align: center;
+  }
+  #controls b { color: var(--cyan); }
+
+  #overlay {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; text-align: center;
+    background: rgba(5,5,15,0.88);
+  }
+  #overlay.hidden { display: none; }
+  #overlay h1 {
+    font-size: clamp(28px, 6vw, 52px);
+    letter-spacing: 8px;
+    margin: 0 0 12px;
+    color: var(--cyan);
+    text-shadow: 0 0 18px rgba(0,255,225,0.6);
+  }
+  #overlay p {
+    color: #9aa6c4;
+    margin: 4px 0;
+    font-size: 14px;
+    max-width: 480px;
+    line-height: 1.6;
+  }
+  #overlay p b { color: var(--pink); }
+  #restartBtn {
+    margin-top: 24px;
+    padding: 12px 36px;
+    background: transparent;
+    border: 2px solid var(--pink);
+    color: var(--pink);
+    font-family: inherit;
+    font-size: 16px;
+    letter-spacing: 4px;
+    cursor: pointer;
+    text-shadow: 0 0 8px rgba(255,43,214,0.6);
+    transition: background 0.15s, color 0.15s;
+  }
+  #restartBtn:hover {
+    background: var(--pink);
+    color: var(--bg);
+  }
+</style>
+</head>
+<body>
+
+<div id="wrap">
+  <div id="hud">
+    <div class="stat">LAP <span id="lapVal">0</span> / <span id="lapTarget">3</span></div>
+    <div class="stat">SCORE <span id="scoreVal">0</span></div>
+    <div class="stat" style="display:flex; align-items:center; gap:8px;">
+      SPEED
+      <div id="speedBarOuter"><div id="speedBarInner"></div></div>
+    </div>
+  </div>
+
+  <div style="position:relative;">
+    <canvas id="gameCanvas" width="900" height="540"></canvas>
+    <div id="overlay">
+      <h1 id="overlayTitle">NEON DRIFT</h1>
+      <p id="overlayMsg">
+        Race 3 laps around the loop.<br>
+        <b>E</b> = accelerate &nbsp; <b>D</b> = brake/reverse &nbsp; <b>S</b> = steer left &nbsp; <b>F</b> = steer right<br>
+        Cross the yellow start line each lap. Avoid the red barriers — hitting one ends the run.
+      </p>
+      <button id="restartBtn">START</button>
+    </div>
+  </div>
+
+  <div id="controls">
+    Controls: <b>E</b> accelerate · <b>D</b> brake / reverse · <b>S</b> steer left · <b>F</b> steer right
+  </div>
+</div>
+
+<script>
+/* =========================================================================
+   NEON DRIFT
+   A small pseudo-3D "rail" racer drawn entirely with the 2D canvas API.
+   No external libraries — everything is hand-rolled so it works offline
+   and in any browser without CDN dependencies.
+
+   How the "3D" road works:
+   - The track is defined as a closed loop of (x, z) points (a flat oval).
+   - The car moves along x/z like a top-down game, but we render the world
+     from a chase-camera perspective: points are projected to screen space
+     using simple perspective division based on depth relative to the car.
+   - This gives a road-racing feel without any 3D engine.
+   ========================================================================= */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// ---------- Track definition ----------
+// Closed oval track centerline, defined in world units (x, z plane).
+const TRACK_RADIUS_X = 70;
+const TRACK_RADIUS_Z = 46;
+const TRACK_SEGMENTS = 80;
+const ROAD_WIDTH = 14;
+
+const trackPoints = [];
+for (let i = 0; i < TRACK_SEGMENTS; i++) {
+  const a = (i / TRACK_SEGMENTS) * Math.PI * 2;
+  trackPoints.push({
+    x: Math.cos(a) * TRACK_RADIUS_X,
+    z: Math.sin(a) * TRACK_RADIUS_Z
+  });
+}
+
+// Checkpoints: indices into trackPoints. Index 0 doubles as the start/finish line.
+const CHECKPOINTS = [0, 20, 40, 60];
+
+// Obstacles: fixed barrier blocks placed at a track index + lateral offset.
+const OBSTACLE_SPECS = [
+  { idx: 8,  offset: 4 },
+  { idx: 16, offset: -4 },
+  { idx: 30, offset: 3 },
+  { idx: 46, offset: -3 },
+  { idx: 56, offset: 4 },
+  { idx: 70, offset: -4 },
+];
+
+function buildObstacles() {
+  return OBSTACLE_SPECS.map(spec => {
+    const cur = trackPoints[spec.idx % TRACK_SEGMENTS];
+    const next = trackPoints[(spec.idx + 1) % TRACK_SEGMENTS];
+    const dx = next.x - cur.x, dz = next.z - cur.z;
+    const len = Math.hypot(dx, dz);
+    const nx = -dz / len, nz = dx / len; // left-hand normal
+    return {
+      x: cur.x + nx * spec.offset,
+      z: cur.z + nz * spec.offset,
+      radius: 2.2
+    };
+  });
+}
+let obstacles = buildObstacles();
+
+// ---------- Game state ----------
+const state = {
+  carX: trackPoints[0].x,
+  carZ: trackPoints[0].z,
+  heading: 0,        // radians; 0 = facing +z
+  speed: 0,
+  maxSpeed: 0.85,
+  accel: 0.018,
+  brakeDecel: 0.035,
+  reverseSpeed: -0.4,
+  friction: 0.01,
+  turnRate: 0.045,
+  laps: 0,
+  lapTarget: 3,
+  score: 0,
+  nextCheckpoint: 1,
+  running: false
+};
+
+// Set initial heading toward the next track point so the car starts aimed correctly.
+function initHeading() {
+  const a = trackPoints[0];
+  const b = trackPoints[1];
+  state.heading = Math.atan2(b.x - a.x, b.z - a.z);
+}
+initHeading();
+
+// ---------- Input ----------
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+// ---------- HUD references ----------
+const lapValEl = document.getElementById('lapVal');
+const lapTargetEl = document.getElementById('lapTarget');
+const scoreValEl = document.getElementById('scoreVal');
+const speedBarInner = document.getElementById('speedBarInner');
+const overlay = document.getElementById('overlay');
+const overlayTitle = document.getElementById('overlayTitle');
+const overlayMsg = document.getElementById('overlayMsg');
+const restartBtn = document.getElementById('restartBtn');
+
+lapTargetEl.textContent = state.lapTarget;
+
+// ---------- Reset / start ----------
+function resetGame() {
+  state.carX = trackPoints[0].x;
+  state.carZ = trackPoints[0].z;
+  initHeading();
+  state.speed = 0;
+  state.laps = 0;
+  state.score = 0;
+  state.nextCheckpoint = 1;
+  obstacles = buildObstacles();
+
+  lapValEl.textContent = state.laps;
+  scoreValEl.textContent = state.score;
+  speedBarInner.style.width = '0%';
+}
+
+function startGame() {
+  resetGame();
+  state.running = true;
+  overlay.classList.add('hidden');
+}
+
+function endGame(won) {
+  state.running = false;
+  overlayTitle.textContent = won ? 'FINISH!' : 'CRASHED';
+  overlayMsg.innerHTML = won
+    ? `You completed <b>${state.lapTarget}</b> laps!<br>Final score: <b>${state.score}</b>`
+    : `You hit a barrier.<br>Final score: <b>${state.score}</b>`;
+  restartBtn.textContent = 'RESTART';
+  overlay.classList.remove('hidden');
+}
+
+restartBtn.addEventListener('click', startGame);
+// Overlay starts visible (showing instructions) — game waits for START click.
+
+// ---------- Helpers ----------
+function distToTrackCenter(x, z) {
+  let min = Infinity;
+  for (const p of trackPoints) {
+    const d = Math.hypot(x - p.x, z - p.z);
+    if (d < min) min = d;
+  }
+  return min;
+}
+
+function checkObstacleCollision() {
+  for (const o of obstacles) {
+    if (Math.hypot(state.carX - o.x, state.carZ - o.z) < o.radius + 1.4) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function checkCheckpoints() {
+  const idx = CHECKPOINTS[state.nextCheckpoint];
+  const cp = trackPoints[idx];
+  const dist = Math.hypot(state.carX - cp.x, state.carZ - cp.z);
+
+  if (dist < ROAD_WIDTH / 2 + 2.5) {
+    state.score += 50;
+    scoreValEl.textContent = state.score;
+
+    if (state.nextCheckpoint === 0) {
+      // Crossed the start/finish line again -> lap complete
+      state.laps++;
+      state.score += 100;
+      lapValEl.textContent = state.laps;
+      scoreValEl.textContent = state.score;
+
+      if (state.laps >= state.lapTarget) {
+        endGame(true);
+        return;
+      }
+    }
+    state.nextCheckpoint = (state.nextCheckpoint + 1) % CHECKPOINTS.length;
+  }
+}
+
+// ---------- Update ----------
+function update() {
+  if (!state.running) return;
+
+  // Acceleration / braking / reverse
+  if (keys['e']) {
+    state.speed = Math.min(state.speed + state.accel, state.maxSpeed);
+  } else if (keys['d']) {
+    if (state.speed > 0) {
+      state.speed = Math.max(state.speed - state.brakeDecel, 0);
+    } else {
+      state.speed = Math.max(state.speed - state.accel * 0.7, state.reverseSpeed);
+    }
+  } else {
+    if (state.speed > 0) state.speed = Math.max(0, state.speed - state.friction);
+    else if (state.speed < 0) state.speed = Math.min(0, state.speed + state.friction);
+  }
+
+  // Steering — reversed turn direction when moving backward, like a real car
+  const dir = state.speed >= 0 ? 1 : -1;
+  if (keys['s']) state.heading -= state.turnRate * dir;
+  if (keys['f']) state.heading += state.turnRate * dir;
+
+  // Move
+  state.carX += Math.sin(state.heading) * state.speed;
+  state.carZ += Math.cos(state.heading) * state.speed;
+
+  // Off-track slowdown (grass)
+  if (distToTrackCenter(state.carX, state.carZ) > ROAD_WIDTH / 2 + 2) {
+    state.speed *= 0.92;
+  }
+
+  // Collisions
+  if (checkObstacleCollision()) {
+    endGame(false);
+    return;
+  }
+
+  checkCheckpoints();
+
+  // HUD speed bar
+  const pct = Math.max(0, (state.speed / state.maxSpeed) * 100);
+  speedBarInner.style.width = pct + '%';
+}
+
+// =========================================================================
+// RENDERING — pseudo-3D chase-camera projection
+// =========================================================================
+// We render by transforming every world point into "camera space" (rotated
+// & translated so the car sits at the origin facing +z), then projecting
+// to screen space with simple perspective (screen_y/x scale with 1/depth).
+
+const VIEW_DIST = 220;      // how far ahead we draw
+const HORIZON_Y = canvas.height * 0.38;
+const CAM_HEIGHT = 6;
+const FOV_SCALE = 280;      // controls perspective strength
+
+function worldToCamera(x, z) {
+  // Translate relative to car
+  let dx = x - state.carX;
+  let dz = z - state.carZ;
+  // Rotate by heading so car's forward direction becomes +z (into screen),
+  // with camX matching screen-left/right (positive heading = car turns right
+  // on screen, matching the steering controls below).
+  const cosH = Math.cos(state.heading);
+  const sinH = Math.sin(state.heading);
+  const camX = dx * cosH - dz * sinH;
+  const camZ = dx * sinH + dz * cosH;
+  return { x: camX, z: camZ };
+}
+
+function project(camX, camZ, worldY) {
+  // camZ is depth (distance ahead of camera along view direction)
+  const depth = Math.max(camZ, 0.5);
+  const scale = FOV_SCALE / depth;
+  const screenX = canvas.width / 2 + camX * scale;
+  const screenY = HORIZON_Y + (CAM_HEIGHT - worldY) * scale * 0.6;
+  return { x: screenX, y: screenY, scale };
+}
+
+function drawBackground() {
+  // Sky gradient
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, HORIZON_Y);
+  skyGrad.addColorStop(0, '#1a0a2e');
+  skyGrad.addColorStop(1, '#3a1655');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, canvas.width, HORIZON_Y);
+
+  // Sun
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(canvas.width / 2, HORIZON_Y - 10, 50, 0, Math.PI * 2);
+  const sunGrad = ctx.createRadialGradient(
+    canvas.width / 2, HORIZON_Y - 10, 0,
+    canvas.width / 2, HORIZON_Y - 10, 50
+  );
+  sunGrad.addColorStop(0, '#ff2bd6');
+  sunGrad.addColorStop(1, 'rgba(255,43,214,0)');
+  ctx.fillStyle = sunGrad;
+  ctx.fill();
+  ctx.restore();
+
+  // Ground
+  const groundGrad = ctx.createLinearGradient(0, HORIZON_Y, 0, canvas.height);
+  groundGrad.addColorStop(0, '#1a1a2e');
+  groundGrad.addColorStop(1, '#050510');
+  ctx.fillStyle = groundGrad;
+  ctx.fillRect(0, HORIZON_Y, canvas.width, canvas.height - HORIZON_Y);
+}
+
+// Build, for the current frame, a list of road quads (one per track segment)
+// that are in front of the camera, sorted far-to-near for correct overdraw.
+function getVisibleRoadQuads() {
+  const quads = [];
+  for (let i = 0; i < TRACK_SEGMENTS; i++) {
+    const p0 = trackPoints[i];
+    const p1 = trackPoints[(i + 1) % TRACK_SEGMENTS];
+
+    const dx = p1.x - p0.x, dz = p1.z - p0.z;
+    const segLen = Math.hypot(dx, dz);
+    const nx = -dz / segLen, nz = dx / segLen;
+
+    const left0  = { x: p0.x + nx * ROAD_WIDTH / 2, z: p0.z + nz * ROAD_WIDTH / 2 };
+    const right0 = { x: p0.x - nx * ROAD_WIDTH / 2, z: p0.z - nz * ROAD_WIDTH / 2 };
+    const left1  = { x: p1.x + nx * ROAD_WIDTH / 2, z: p1.z + nz * ROAD_WIDTH / 2 };
+    const right1 = { x: p1.x - nx * ROAD_WIDTH / 2, z: p1.z - nz * ROAD_WIDTH / 2 };
+
+    const c0 = worldToCamera(left0.x, left0.z);
+    const c1 = worldToCamera(right0.x, right0.z);
+    const c2 = worldToCamera(right1.x, right1.z);
+    const c3 = worldToCamera(left1.x, left1.z);
+
+    // Skip quads entirely behind the camera or too far away
+    const maxZ = Math.max(c0.z, c1.z, c2.z, c3.z);
+    const minZ = Math.min(c0.z, c1.z, c2.z, c3.z);
+    if (maxZ < 0.3 || minZ > VIEW_DIST) continue;
+
+    quads.push({ corners: [c0, c1, c2, c3], depth: (c0.z + c1.z + c2.z + c3.z) / 4, index: i });
+  }
+  // Far to near
+  quads.sort((a, b) => b.depth - a.depth);
+  return quads;
+}
+
+function clipNear(camPt) {
+  // Clamp z so projection doesn't blow up / invert for points behind camera
+  return { x: camPt.x, z: Math.max(camPt.z, 0.4) };
+}
+
+function drawRoad() {
+  const quads = getVisibleRoadQuads();
+  for (const q of quads) {
+    const pts = q.corners.map(c => {
+      const safe = clipNear(c);
+      return project(safe.x, safe.z, 0);
+    });
+
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+
+    // Alternate shading for subtle road segments, plus checkpoint highlight
+    const isCheckpoint = CHECKPOINTS.includes(q.index);
+    if (isCheckpoint && q.index === 0) {
+      ctx.fillStyle = 'rgba(255, 230, 0, 0.18)';
+    } else if (isCheckpoint) {
+      ctx.fillStyle = 'rgba(0, 255, 225, 0.10)';
+    } else {
+      ctx.fillStyle = (q.index % 2 === 0) ? '#15152b' : '#1b1b35';
+    }
+    ctx.fill();
+
+    // Edge lines (left = cyan, right = pink)
+    ctx.lineWidth = Math.max(1, 3 * (pts[0].scale || 1) / 10);
+    ctx.strokeStyle = '#00ffe1';
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    ctx.lineTo(pts[3].x, pts[3].y);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#ff2bd6';
+    ctx.beginPath();
+    ctx.moveTo(pts[1].x, pts[1].y);
+    ctx.lineTo(pts[2].x, pts[2].y);
+    ctx.stroke();
+
+    // Start/finish line marker
+    if (q.index === 0) {
+      ctx.fillStyle = '#ffe600';
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      ctx.lineTo(pts[1].x, pts[1].y);
+      ctx.lineTo(pts[2].x, pts[2].y);
+      ctx.lineTo(pts[3].x, pts[3].y);
+      ctx.closePath();
+      ctx.globalAlpha = 0.35;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+function drawObstacles() {
+  // Project obstacle centers, sort by depth, draw far-to-near
+  const projected = obstacles.map(o => {
+    const cam = worldToCamera(o.x, o.z);
+    return { o, cam };
+  }).filter(p => p.cam.z > 0.3 && p.cam.z < VIEW_DIST)
+    .sort((a, b) => b.cam.z - a.cam.z);
+
+  for (const { o, cam } of projected) {
+    const safe = clipNear(cam);
+    const base = project(safe.x, safe.z, 0);
+    const top = project(safe.x, safe.z, o.radius * 2);
+    const size = Math.max(2, (base.y - top.y));
+
+    ctx.fillStyle = '#ff3b3b';
+    ctx.shadowColor = '#ff3b3b';
+    ctx.shadowBlur = 12;
+    ctx.fillRect(base.x - size / 2, top.y, size, size);
+    ctx.shadowBlur = 0;
+
+    // Outline
+    ctx.strokeStyle = '#ffb3b3';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(base.x - size / 2, top.y, size, size);
+  }
+}
+
+function drawCar() {
+  // Car drawn at a fixed screen position (bottom-center), since the camera
+  // follows it. Includes a slight tilt based on steering input for feedback.
+  const cx = canvas.width / 2;
+  const cy = canvas.height - 70;
+  const w = 64, h = 92;
+
+  let tilt = 0;
+  if (state.running) {
+    if (keys['s']) tilt = -0.08;
+    if (keys['f']) tilt = 0.08;
+  }
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(tilt);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath();
+  ctx.ellipse(0, h * 0.42, w * 0.55, 10, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  const bodyGrad = ctx.createLinearGradient(0, -h/2, 0, h/2);
+  bodyGrad.addColorStop(0, '#00ffe1');
+  bodyGrad.addColorStop(1, '#0aa');
+  ctx.fillStyle = bodyGrad;
+  roundRect(-w/2, -h/2, w, h, 14);
+  ctx.fill();
+
+  // Cabin
+  ctx.fillStyle = '#0c0c1e';
+  roundRect(-w/2 + 10, -h/2 + 14, w - 20, h * 0.45, 10);
+  ctx.fill();
+
+  // Headlights
+  ctx.fillStyle = '#fff6c8';
+  ctx.shadowColor = '#fff6c8';
+  ctx.shadowBlur = 10;
+  ctx.fillRect(-w/2 + 6, -h/2 + 4, 10, 8);
+  ctx.fillRect(w/2 - 16, -h/2 + 4, 10, 8);
+  ctx.shadowBlur = 0;
+
+  // Taillights
+  ctx.fillStyle = '#ff2bd6';
+  ctx.fillRect(-w/2 + 6, h/2 - 12, 10, 6);
+  ctx.fillRect(w/2 - 16, h/2 - 12, 10, 6);
+
+  ctx.restore();
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function render() {
+  drawBackground();
+  drawRoad();
+  drawObstacles();
+  drawCar();
+}
+
+// ---------- Main loop ----------
+function loop() {
+  update();
+  render();
+  requestAnimationFrame(loop);
+}
+
+resetGame();
+render(); // draw initial frame behind the start overlay
+loop();
+</script>
+</body>
+</html>

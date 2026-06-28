@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neon Snake</title>
+<style>
+  :root { --cyan:#00ffe1; --pink:#ff2bd6; --yellow:#ffe600; --bg:#05050f; --panel:#0c0c1e; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; background:var(--bg); font-family:'Courier New',monospace; color:var(--cyan); overflow:hidden; }
+  #wrap { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:10px; }
+  #topbar { display:flex; gap:28px; align-items:center; width:100%; max-width:600px; padding:0 8px; letter-spacing:2px; font-size:15px; text-shadow:0 0 8px rgba(0,255,225,0.5); }
+  #topbar span b { color:#fff; }
+  #gameCanvas { border:2px solid var(--cyan); box-shadow:0 0 28px rgba(0,255,225,0.2); cursor:none; display:block; }
+  #hint { font-size:13px; color:#7d8bb8; letter-spacing:1px; text-align:center; }
+  #hint b { color:var(--cyan); }
+  #overlay { position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; flex-direction:column; text-align:center; background:rgba(5,5,15,0.88); }
+  #overlay.hidden { display:none; }
+  #overlay h1 { font-size:clamp(26px,5.5vw,48px); letter-spacing:8px; margin-bottom:10px; color:var(--cyan); text-shadow:0 0 20px rgba(0,255,225,0.55); }
+  #overlay p { color:#9aa6c4; font-size:14px; line-height:1.7; max-width:400px; }
+  #overlay p b { color:var(--pink); }
+  #overlayBtn { margin-top:22px; padding:12px 36px; background:transparent; border:2px solid var(--pink); color:var(--pink); font-family:inherit; font-size:16px; letter-spacing:4px; cursor:pointer; transition:background 0.15s,color 0.15s; }
+  #overlayBtn:hover { background:var(--pink); color:var(--bg); }
+  #overlayScore { margin-top:8px; font-size:13px; color:#7d8bb8; }
+  #shrinkWarn { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); font-size:22px; letter-spacing:4px; color:var(--pink); text-shadow:0 0 16px var(--pink); pointer-events:none; opacity:0; transition:opacity 0.3s; }
+  #shrinkWarn.show { opacity:1; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="topbar">
+    <span>SCORE <b id="scoreVal">0</b></span>
+    <span>HIGH <b id="highVal">0</b></span>
+    <span>LENGTH <b id="lenVal">1</b></span>
+    <span style="color:var(--pink)">SHRINK <b id="shrinkVal" style="color:#fff">15s</b></span>
+  </div>
+  <div style="position:relative;">
+    <canvas id="gameCanvas" width="600" height="600"></canvas>
+    <div id="shrinkWarn">⚠ ARENA SHRINKING</div>
+    <div id="overlay">
+      <h1 id="overlayTitle">NEON SNAKE</h1>
+      <p id="overlayMsg">Eat yellow orbs to grow. The arena <b>shrinks every 15 seconds</b> — don't get caught in the walls!<br><br>Arrow keys or WASD to steer.</p>
+      <button id="overlayBtn">START</button>
+      <div id="overlayScore"></div>
+    </div>
+  </div>
+  <div id="hint">Arrow keys / <b>WASD</b> to steer</div>
+</div>
+<script>
+/* ================================================================
+   NEON SNAKE — shrinking arena edition
+   ================================================================ */
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const CELL       = 20;     // px per grid cell
+const COLS       = W / CELL;
+const ROWS       = H / CELL;
+const BASE_SPEED = 120;    // ms per snake tick (lower = faster)
+const SHRINK_INT = 15000;  // ms between arena shrinks
+const SPEED_INC  = 6;      // ms faster per food eaten
+
+// Colours
+const C_BG     = '#05050f';
+const C_CYAN   = '#00ffe1';
+const C_PINK   = '#ff2bd6';
+const C_YELLOW = '#ffe600';
+const C_WALL   = '#1b1b35';
+
+// ── state ────────────────────────────────────────────────
+let snake, dir, nextDir, food, particles;
+let score, highScore = 0, speed;
+let wallInset;           // how many cells the arena has shrunk from each edge
+let shrinkTimer, gameState, lastTick, shrinkCountdown;
+let shrinkWarning = false;
+
+function initState() {
+  const startCol = Math.floor(COLS / 2);
+  const startRow = Math.floor(ROWS / 2);
+  snake    = [{ x: startCol, y: startRow }, { x: startCol - 1, y: startRow }, { x: startCol - 2, y: startRow }];
+  dir      = { x: 1, y: 0 };
+  nextDir  = { x: 1, y: 0 };
+  score    = 0;
+  speed    = BASE_SPEED;
+  wallInset = 0;
+  particles = [];
+  lastTick  = null;
+  shrinkTimer    = SHRINK_INT;
+  shrinkCountdown = 15;
+  gameState = 'playing';
+  document.getElementById('scoreVal').textContent = 0;
+  document.getElementById('lenVal').textContent   = snake.length;
+  document.getElementById('shrinkVal').textContent = '15s';
+  placeFood();
+}
+
+function placeFood() {
+  const min = wallInset, maxC = COLS - 1 - wallInset, maxR = ROWS - 1 - wallInset;
+  let fx, fy, tries = 0;
+  do {
+    fx = min + Math.floor(Math.random() * (maxC - min + 1));
+    fy = min + Math.floor(Math.random() * (maxR - min + 1));
+    tries++;
+  } while (snake.some(s => s.x === fx && s.y === fy) && tries < 200);
+  food = { x: fx, y: fy };
+}
+
+// ── input ────────────────────────────────────────────────
+const DIR_MAP = {
+  ArrowUp:    { x:0, y:-1 }, e: { x:0, y:-1 },
+  ArrowDown:  { x:0, y:1  }, d: { x:0, y:1  },
+  ArrowLeft:  { x:-1,y:0  }, s: { x:-1,y:0  },
+  ArrowRight: { x:1, y:0  }, f: { x:1, y:0  },
+};
+window.addEventListener('keydown', e => {
+  const d = DIR_MAP[e.key] || DIR_MAP[e.key.toLowerCase()];
+  if (d) {
+    e.preventDefault();
+    // prevent 180-degree reversal
+    if (d.x !== -dir.x || d.y !== -dir.y) nextDir = d;
+  }
+});
+
+// ── particles ─────────────────────────────────────────────
+function spawnParticles(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const v = 1.5 + Math.random() * 3;
+    particles.push({ x, y, vx: Math.cos(a)*v, vy: Math.sin(a)*v, life: 30, maxLife:30, color, size: 2+Math.random()*3 });
+  }
+}
+
+// ── update ────────────────────────────────────────────────
+let shrinkWarnEl = document.getElementById('shrinkWarn');
+
+function update(dt) {
+  if (gameState !== 'playing') return;
+
+  // Shrink countdown
+  shrinkTimer -= dt;
+  shrinkCountdown = Math.max(0, Math.ceil(shrinkTimer / 1000));
+  document.getElementById('shrinkVal').textContent = shrinkCountdown + 's';
+
+  if (shrinkTimer <= 3000 && !shrinkWarning) {
+    shrinkWarning = true;
+    shrinkWarnEl.classList.add('show');
+  }
+
+  if (shrinkTimer <= 0) {
+    wallInset++;
+    shrinkTimer = SHRINK_INT;
+    shrinkWarning = false;
+    shrinkWarnEl.classList.remove('show');
+    // Kill snake if it's inside the new wall
+    checkWallDeath();
+    if (gameState !== 'playing') return;
+    // Move food if it's inside wall
+    const min = wallInset, maxC = COLS - 1 - wallInset, maxR = ROWS - 1 - wallInset;
+    if (food.x < min || food.x > maxC || food.y < min || food.y > maxR) placeFood();
+  }
+
+  // Snake tick
+  if (lastTick === null) lastTick = 0;
+  lastTick += dt;
+  if (lastTick < speed) return;
+  lastTick -= speed;
+
+  dir = { ...nextDir };
+  const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+  // Wall collision
+  const min = wallInset, maxC = COLS - 1 - wallInset, maxR = ROWS - 1 - wallInset;
+  if (head.x < min || head.x > maxC || head.y < min || head.y > maxR) {
+    die(); return;
+  }
+  // Self collision
+  if (snake.some(s => s.x === head.x && s.y === head.y)) { die(); return; }
+
+  snake.unshift(head);
+
+  if (head.x === food.x && head.y === food.y) {
+    score += 10;
+    speed  = Math.max(60, speed - SPEED_INC);
+    document.getElementById('scoreVal').textContent = score;
+    document.getElementById('lenVal').textContent   = snake.length;
+    spawnParticles(food.x * CELL + CELL/2, food.y * CELL + CELL/2, C_YELLOW, 12);
+    placeFood();
+  } else {
+    snake.pop();
+  }
+
+  for (let i = particles.length-1; i>=0; i--) {
+    const p = particles[i]; p.x+=p.vx; p.y+=p.vy; p.vy+=0.15; p.life--;
+    if (p.life<=0) particles.splice(i,1);
+  }
+}
+
+function checkWallDeath() {
+  const min = wallInset, maxC = COLS-1-wallInset, maxR = ROWS-1-wallInset;
+  for (const seg of snake) {
+    if (seg.x < min || seg.x > maxC || seg.y < min || seg.y > maxR) { die(); return; }
+  }
+}
+
+function die() {
+  gameState = 'dead';
+  spawnParticles(snake[0].x*CELL+CELL/2, snake[0].y*CELL+CELL/2, C_CYAN, 20);
+  spawnParticles(snake[0].x*CELL+CELL/2, snake[0].y*CELL+CELL/2, C_PINK, 14);
+  if (score > highScore) highScore = score;
+  document.getElementById('highVal').textContent = highScore;
+  shrinkWarnEl.classList.remove('show');
+  setTimeout(() => showOverlay(false), 500);
+}
+
+// ── draw ──────────────────────────────────────────────────
+function drawBackground() {
+  ctx.fillStyle = C_BG; ctx.fillRect(0,0,W,H);
+  // Grid
+  ctx.strokeStyle = 'rgba(0,255,225,0.06)'; ctx.lineWidth = 1;
+  for (let x=0; x<=W; x+=CELL) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for (let y=0; y<=H; y+=CELL) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+}
+
+function drawWalls() {
+  const in_ = wallInset * CELL;
+  const inW  = W - in_*2, inH = H - in_*2;
+  // Shaded wall area
+  ctx.fillStyle = 'rgba(255,43,214,0.06)';
+  // top
+  ctx.fillRect(0,0,W,in_);
+  // bottom
+  ctx.fillRect(0,H-in_,W,in_);
+  // left
+  ctx.fillRect(0,in_,in_,H-in_*2);
+  // right
+  ctx.fillRect(W-in_,in_,in_,H-in_*2);
+
+  if (wallInset === 0) return;
+  // Glowing inner border
+  ctx.save();
+  ctx.shadowColor = C_PINK; ctx.shadowBlur = 14;
+  ctx.strokeStyle = C_PINK; ctx.lineWidth = 2;
+  ctx.strokeRect(in_+1, in_+1, inW-2, inH-2);
+  ctx.restore();
+}
+
+function drawFood() {
+  const pulse = 0.8 + 0.2*Math.sin(Date.now()*0.005);
+  const fx = food.x*CELL+CELL/2, fy = food.y*CELL+CELL/2;
+  ctx.save();
+  ctx.shadowColor = C_YELLOW; ctx.shadowBlur = 16*pulse;
+  ctx.fillStyle   = C_YELLOW;
+  ctx.beginPath(); ctx.arc(fx, fy, CELL*0.38*pulse, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.beginPath(); ctx.arc(fx-2, fy-2, CELL*0.12, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawSnake() {
+  for (let i = snake.length-1; i>=0; i--) {
+    const seg = snake[i];
+    const sx = seg.x*CELL, sy = seg.y*CELL;
+    const isHead = i===0;
+    ctx.save();
+    ctx.shadowColor = C_CYAN;
+    ctx.shadowBlur  = isHead ? 16 : 8;
+    // gradient per segment fading toward tail
+    const t = i / snake.length;
+    const alpha = 1 - t * 0.5;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle   = isHead ? C_CYAN : `rgba(0,200,180,${alpha})`;
+    const r = isHead ? 6 : 4;
+    roundRect(sx+2, sy+2, CELL-4, CELL-4, r);
+    ctx.fill();
+    if (isHead) {
+      // Eyes
+      ctx.fillStyle  = '#05050f';
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
+      const ex = dir.x, ey = dir.y;
+      const e1x = sx+CELL/2 + ey*5  - ex*2 + ex*(CELL*0.28);
+      const e1y = sy+CELL/2 - ex*5  - ey*2 + ey*(CELL*0.28);
+      const e2x = sx+CELL/2 - ey*5  - ex*2 + ex*(CELL*0.28);
+      const e2y = sy+CELL/2 + ex*5  - ey*2 + ey*(CELL*0.28);
+      ctx.beginPath(); ctx.arc(e1x,e1y,2.5,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(e2x,e2y,2.5,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = p.life/p.maxLife;
+    ctx.fillStyle   = p.color;
+    ctx.shadowColor = p.color; ctx.shadowBlur = 6;
+    ctx.fillRect(p.x-p.size/2, p.y-p.size/2, p.size, p.size);
+  }
+  ctx.globalAlpha=1; ctx.shadowBlur=0;
+}
+
+function roundRect(x,y,w,h,r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+
+function render() {
+  drawBackground(); drawWalls(); drawFood(); drawSnake(); drawParticles();
+}
+
+// ── overlay ───────────────────────────────────────────────
+const overlay   = document.getElementById('overlay');
+const overlayTitle = document.getElementById('overlayTitle');
+const overlayMsg   = document.getElementById('overlayMsg');
+const overlayBtn   = document.getElementById('overlayBtn');
+const overlayScore = document.getElementById('overlayScore');
+
+function showOverlay(won) {
+  overlayTitle.textContent = 'GAME OVER';
+  overlayMsg.innerHTML = `You scored <b>${score}</b> points with a snake length of <b>${snake.length}</b>.`;
+  overlayScore.textContent = `High score: ${highScore}`;
+  overlayBtn.textContent = 'RETRY';
+  overlay.classList.remove('hidden');
+}
+
+overlayBtn.addEventListener('click', () => {
+  overlay.classList.add('hidden');
+  initState();
+});
+
+// ── loop ──────────────────────────────────────────────────
+let lastTime = 0;
+function loop(ts) {
+  const dt = ts - lastTime; lastTime = ts;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+initState();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
